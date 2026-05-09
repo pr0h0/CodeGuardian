@@ -19,7 +19,12 @@ const patterns: Array<{ kind: string; regex: RegExp; nameGroup?: number }> = [
   { kind: "type", regex: /^\s*type\s+([A-Za-z_]\w*)\s+/gm, nameGroup: 1 },
   { kind: "function", regex: /^\s*(?:public|private|protected|static|\s)*[\w<>\[\], ?]+\s+([A-Za-z_]\w*)\s*\([^;]*\)\s*\{/gm, nameGroup: 1 },
   { kind: "module", regex: /^\s*module\s+([A-Za-z_:]\w*)/gm, nameGroup: 1 },
-  { kind: "function", regex: /^\s*function\s+([A-Za-z_]\w*)\s*\(/gm, nameGroup: 1 }
+  { kind: "function", regex: /^\s*function\s+([A-Za-z_]\w*)\s*\(/gm, nameGroup: 1 },
+  { kind: "class", regex: /^\s*(?:abstract\s+|final\s+)?class\s+([A-Za-z_]\w*)/gm, nameGroup: 1 },
+  { kind: "function", regex: /^\s*(?:public|protected|private|static|\s)*function\s+([A-Za-z_]\w*)\s*\(/gm, nameGroup: 1 },
+  { kind: "namespace", regex: /^\s*namespace\s+([^;{]+)/gm, nameGroup: 1 },
+  { kind: "module", regex: /^\s*module\s+([A-Za-z_:][\w:]*)/gm, nameGroup: 1 },
+  { kind: "function", regex: /^\s*def\s+(?:self\.)?([A-Za-z_]\w*[!?=]?)\s*(?:\(|$)/gm, nameGroup: 1 }
 ];
 
 export function extractSymbols(content: string): SymbolInfo[] {

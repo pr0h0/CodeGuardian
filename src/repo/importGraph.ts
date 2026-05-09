@@ -6,6 +6,8 @@ export function extractImports(content: string): string[] {
     /^\s*from\s+([\w.]+)\s+import\s+/gm,
     /^\s*import\s+([\w.]+)/gm,
     /^\s*use\s+([^;]+);/gm,
+    /\b(?:require|require_once|include|include_once)\s*\(?\s*['"]([^'"]+)['"]\s*\)?/g,
+    /^\s*(?:require|require_relative)\s+['"]([^'"]+)['"]/gm,
     /^\s*#include\s+[<"]([^>"]+)[>"]/gm
   ];
   for (const regex of regexes) for (const match of content.matchAll(regex)) imports.add(match[1]);

@@ -5,7 +5,7 @@ const byExt: Record<string, string> = {
   ".ts": "typescript", ".tsx": "typescript",
   ".py": "python", ".go": "go", ".php": "php", ".rb": "ruby",
   ".java": "java", ".kt": "kotlin", ".cs": "csharp", ".c": "c", ".h": "c", ".cpp": "cpp", ".cc": "cpp", ".hpp": "cpp",
-  ".rs": "rust", ".swift": "swift", ".scala": "scala", ".sh": "shell",
+  ".rs": "rust", ".swift": "swift", ".scala": "scala", ".sh": "shell", ".bash": "shell", ".zsh": "shell",
   ".json": "json", ".yml": "yaml", ".yaml": "yaml", ".toml": "toml", ".xml": "xml", ".html": "html", ".css": "css"
 };
 

@@ -258,9 +258,9 @@ function scoreFile(file: IndexedFile, scannerPaths: Set<string>): number {
 
 function priorityHints(file: IndexedFile): string[] {
   const hints: string[] = [];
-  if (/(route|routes|controller|api|server|auth|session|login|webhook|admin|security|crypto|upload|email|billing|tenant|shopify)/i.test(file.path)) hints.push("security-critical-path");
+  if (/(route|routes|controller|command|cli|bin\/|exe\/|rake|task|worker|job|api|server|auth|session|login|webhook|admin|security|crypto|upload|email|billing|tenant|shopify)/i.test(file.path)) hints.push("security-critical-path");
   if (detectRoutes(file.path, file.content).length) hints.push("route-entrypoint");
-  if (/(getSession|requireAuth|admin|jwt|csrf|cors|crypto|encrypt|decrypt|webhook|fetch|axios|redirect|sendFile|readFile|createTransport)/i.test(file.content)) hints.push("security-sensitive-symbols");
+  if (/(getSession|requireAuth|admin|jwt|csrf|cors|crypto|encrypt|decrypt|webhook|fetch|axios|redirect|sendFile|readFile|createTransport|params|ARGV|process\.argv|sys\.argv|\$_(GET|POST|REQUEST|COOKIE)|unserialize|Marshal\.load|YAML\.load|shell_exec|Open3|system\()/i.test(file.content)) hints.push("security-sensitive-symbols");
   return hints;
 }
 
