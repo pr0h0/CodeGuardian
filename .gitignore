@@ -1,0 +1,17 @@
+node_modules/
+dist/
+codeguardian-report/
+.codeguardian/
+.env
+.env.*
+!.env.example
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.DS_Store
+coverage/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+PLAN.md

@@ -1,0 +1,20 @@
+[
+  {"id":"js-eval","title":"Dynamic eval usage","severity":"high","category":"injection","regex":"\\beval\\s*\\(","extensions":[".js",".jsx",".ts",".tsx"]},
+  {"id":"js-function-constructor","title":"Function constructor usage","severity":"high","category":"injection","regex":"\\bnew\\s+Function\\s*\\(","extensions":[".js",".jsx",".ts",".tsx"]},
+  {"id":"node-child-process","title":"Child process execution sink","severity":"high","category":"command-injection","regex":"\\b(exec|execSync|spawn|spawnSync)\\s*\\(","extensions":[".js",".jsx",".ts",".tsx"]},
+  {"id":"python-shell-true","title":"Python subprocess shell=True","severity":"high","category":"command-injection","regex":"shell\\s*=\\s*True","extensions":[".py"]},
+  {"id":"sql-concat","title":"SQL query string concatenation candidate","severity":"high","category":"sql-injection","regex":"(SELECT|INSERT|UPDATE|DELETE).*(\\+|\\$\\{|%s|format\\()","extensions":[".js",".ts",".py",".php",".rb",".go",".java",".cs"]},
+  {"id":"raw-html","title":"Raw HTML injection candidate","severity":"medium","category":"xss","regex":"(innerHTML\\s*=|v-html=|dangerouslySetInnerHTML)","extensions":[".js",".jsx",".ts",".tsx",".vue"]},
+  {"id":"insecure-random","title":"Insecure random usage","severity":"medium","category":"weak-crypto","regex":"\\b(Math\\.random|random\\.random)\\s*\\(","extensions":[".js",".ts",".py"]},
+  {"id":"hardcoded-jwt-secret","title":"Hardcoded JWT secret candidate","severity":"high","category":"secrets","regex":"(JWT_SECRET|jwtSecret|secretKey)\\s*[:=]\\s*['\\\"][^'\\\"]{8,}['\\\"]"},
+  {"id":"generic-secret-assignment","title":"Hardcoded secret assignment candidate","severity":"high","category":"secrets","regex":"\\b(api[_-]?key|token|password|secret|client[_-]?secret)\\b\\s*[:=]\\s*['\\\"]?[^'\\\"\\s]{8,}['\\\"]?"},
+  {"id":"tls-disabled","title":"TLS verification disabled","severity":"high","category":"transport-security","regex":"(rejectUnauthorized\\s*:\\s*false|NODE_TLS_REJECT_UNAUTHORIZED\\s*=\\s*['\\\"]?0|verify\\s*=\\s*False)"},
+  {"id":"permissive-cors","title":"Permissive CORS candidate","severity":"medium","category":"cors","regex":"(Access-Control-Allow-Origin.*\\*|origin\\s*:\\s*['\\\"]\\*['\\\"]|cors\\s*\\(\\s*\\))"},
+  {"id":"path-traversal","title":"Path traversal sink candidate","severity":"high","category":"path-traversal","regex":"(sendFile|readFile|createReadStream|open)\\s*\\([^\\n]*(req\\.|request\\.|params|query|body)"},
+  {"id":"ssrf-candidate","title":"SSRF candidate","severity":"high","category":"ssrf","regex":"(fetch|axios\\.|request\\(|http\\.get|https\\.get)\\s*\\([^\\n]*(req\\.|request\\.|params|query|body)"},
+  {"id":"open-redirect","title":"Open redirect candidate","severity":"medium","category":"open-redirect","regex":"(redirect|location\\.href|Location)\\s*\\([^\\n]*(req\\.|request\\.|params|query|body)"},
+  {"id":"weak-crypto","title":"Weak cryptographic primitive","severity":"medium","category":"weak-crypto","regex":"\\b(md5|sha1|DES|RC4)\\b"},
+  {"id":"debug-endpoint","title":"Debug endpoint candidate","severity":"low","category":"debug","regex":"(app\\.(get|post)|router\\.(get|post)).*['\\\"]/(debug|admin|internal|actuator)"},
+  {"id":"default-password","title":"Default password candidate","severity":"high","category":"secrets","regex":"(password|passwd|pwd)\\s*[:=]\\s*['\\\"](admin|password|changeme|123456)['\\\"]"},
+  {"id":"auth-bypass-comment","title":"Security-sensitive bypass comment","severity":"medium","category":"auth","regex":"(TODO|FIXME|HACK).*(auth|csrf|xss|sql|security|bypass|permission|tenant)"}
+]

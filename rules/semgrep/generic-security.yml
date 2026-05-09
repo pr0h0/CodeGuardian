@@ -1,0 +1,11 @@
+rules:
+  - id: codeguardian-js-eval
+    pattern: eval(...)
+    message: Dynamic eval execution can enable code injection.
+    severity: WARNING
+    languages: [javascript, typescript]
+  - id: codeguardian-dangerously-set-inner-html
+    pattern: dangerouslySetInnerHTML
+    message: Raw HTML rendering can enable XSS when input is not sanitized.
+    severity: WARNING
+    languages: [javascript, typescript]

@@ -1,0 +1,11 @@
+services:
+  codeguardian:
+    build: .
+    working_dir: /workspace
+    volumes:
+      - .:/workspace
+      - codeguardian-cache:/home/pptruser/.cache
+    command: ["scan", "/workspace", "--no-ai"]
+
+volumes:
+  codeguardian-cache:

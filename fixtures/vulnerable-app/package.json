@@ -1,0 +1,1 @@
+{"name":"vulnerable-app","type":"module","dependencies":{"express":"^4.18.0","cors":"^2.8.5"}}
