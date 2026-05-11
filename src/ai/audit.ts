@@ -19,7 +19,13 @@ const auditFindingSchema = z.object({
   startLine: z.number().int().positive().optional(),
   endLine: z.number().int().positive().optional(),
   source: z.string().default("AI exploratory audit"),
+  sourceLine: z.number().int().positive().nullable().default(null),
   sink: z.string().default("source code"),
+  sinkLine: z.number().int().positive().nullable().default(null),
+  dataFlow: z.array(z.object({ path: z.string(), line: z.number().int().positive(), step: z.string() })).default([]),
+  missingControl: z.string().default(""),
+  exploitPreconditions: z.array(z.string()).default([]),
+  safeRepro: z.array(z.string()).default([]),
   evidence: z.array(z.object({ path: z.string(), line: z.number().int().positive(), note: z.string() })).default([]),
   reasoning: z.string(),
   remediation: z.string()
@@ -36,6 +42,7 @@ export interface AiExploratoryAuditOptions {
   maxFiles: number;
   maxRounds: number;
   maxChars: number;
+  aiInstructions?: string;
 }
 
 interface ManifestEntry {
@@ -62,7 +69,7 @@ export async function runExploratoryAudit(
   const inspected = new Set<string>();
   const findings: Finding[] = [];
   let remainingChars = options.maxChars;
-  let requested = await requestInitialFiles(provider, manifest, log);
+  let requested = await requestInitialFiles(provider, manifest, log, options.aiInstructions ?? "");
   if (!requested.length) requested = heuristicEntryFiles(candidates, scannerResults);
   const messages: AiMessage[] = [{ role: "user", content: buildInitialPrompt(manifest, options) }];
 
@@ -94,11 +101,11 @@ export async function runExploratoryAudit(
   return dedupeFindings(findings);
 }
 
-async function requestInitialFiles(provider: AiProvider, manifest: unknown, log: (message: string) => void): Promise<string[]> {
+async function requestInitialFiles(provider: AiProvider, manifest: unknown, log: (message: string) => void, aiInstructions: string): Promise<string[]> {
   log("ai-audit: asking AI to choose initial files from manifest");
   const output = await provider.complete({
     system: buildAuditSystemPrompt(),
-    messages: [{ role: "user", content: buildInitialPrompt(manifest, { maxFiles: 10, maxRounds: 1, maxChars: 30000 }) }],
+    messages: [{ role: "user", content: buildInitialPrompt(manifest, { maxFiles: 10, maxRounds: 1, maxChars: 30000, aiInstructions }) }],
     temperature: 0,
     maxTokens: 1800
   });
@@ -133,10 +140,13 @@ function buildAuditSystemPrompt(): string {
     "Role: senior application security auditor.",
     "Goal: find source-code vulnerabilities missed by deterministic SAST scanners.",
     "You first receive a repository manifest, then selected source files.",
+    "Honor repository AI instructions as local security context and use them to reject known false positives unless supplied source contradicts them.",
+    "Audit by attack surface priority: external routes, auth/session, upload/download, webhooks, CLI args, background jobs, crypto/secrets, dependency usage.",
+    "Use targeted passes: list sources, list sinks, trace source-to-sink, then check sanitizers/guards.",
     "Request more files by exact path when needed. Do not ask for generated, lockfile, binary, or dependency code.",
     "Only report vulnerabilities supported by supplied source code. Do not invent files or line numbers.",
     "Focus on auth/authz, tenant isolation, injection, XSS, SSRF, path traversal, file upload, crypto misuse, webhooks, CORS/CSRF/session bugs, secrets, unsafe redirects, unsafe dynamic execution.",
-    "Return one JSON object only: {summary, requestedFiles, complete, findings}. findings must include title, category, severity, confidence, status, path, startLine, endLine, source, sink, evidence, reasoning, remediation."
+    "Return one JSON object only: {summary, requestedFiles, complete, findings}. findings must include title, category, severity, confidence, status, path, startLine, endLine, source, sourceLine, sink, sinkLine, dataFlow, missingControl, exploitPreconditions, safeRepro, evidence, reasoning, remediation."
   ].join("\n");
 }
 
@@ -149,6 +159,9 @@ Caps:
 - max source chars: ${options.maxChars}
 
 Return JSON only with requestedFiles. Do not include findings until source file contents are supplied.
+
+Repository AI instructions:
+${options.aiInstructions || "None supplied."}
 
 Manifest:
 ${JSON.stringify(manifest, null, 2)}`;
@@ -179,7 +192,13 @@ Return JSON only:
       "startLine": 1,
       "endLine": 1,
       "source": "source of tainted input",
+      "sourceLine": 1,
       "sink": "dangerous operation",
+      "sinkLine": 1,
+      "dataFlow": [{"path":"exact/path.ts","line":1,"step":"source -> variable -> sink"}],
+      "missingControl": "missing sanitizer/auth/allowlist/validation",
+      "exploitPreconditions": ["condition required for exploit"],
+      "safeRepro": ["safe verification step"],
       "evidence": [{"path":"exact/path.ts","line":1,"note":"evidence"}],
       "reasoning": "why exploitable from supplied code",
       "remediation": "specific fix"
@@ -249,11 +268,20 @@ function nextUnseenHeuristicFiles(files: IndexedFile[], scannerResults: ScannerR
 }
 
 function scoreManifestFile(file: ManifestEntry): number {
-  return file.priorityHints.length * 10 + file.routes.length * 5 + (file.hasScannerResult ? 8 : 0);
+  return attackSurfaceWeight(file.path) + file.priorityHints.length * 10 + file.routes.length * 6 + (file.hasScannerResult ? 8 : 0);
 }
 
 function scoreFile(file: IndexedFile, scannerPaths: Set<string>): number {
-  return priorityHints(file).length * 10 + detectRoutes(file.path, file.content).length * 5 + (scannerPaths.has(file.path) ? 8 : 0) - Math.min(file.lineCount / 500, 5);
+  return attackSurfaceWeight(file.path) + priorityHints(file).length * 10 + detectRoutes(file.path, file.content).length * 6 + (scannerPaths.has(file.path) ? 8 : 0) - Math.min(file.lineCount / 500, 5);
+}
+
+function attackSurfaceWeight(filePath: string): number {
+  if (/(routes?|controllers?|api|server|entry|webhook)/i.test(filePath)) return 60;
+  if (/(auth|session|login|permission|policy|tenant|admin)/i.test(filePath)) return 55;
+  if (/(upload|download|file|storage)/i.test(filePath)) return 45;
+  if (/(bin\/|cli|command|task|rake|worker|job)/i.test(filePath)) return 35;
+  if (/(crypto|secret|env|config)/i.test(filePath)) return 25;
+  return 0;
 }
 
 function priorityHints(file: IndexedFile): string[] {
@@ -290,8 +318,8 @@ function toFinding(input: z.infer<typeof auditFindingSchema>): Finding {
     path: input.path,
     startLine: input.startLine,
     endLine: input.endLine ?? input.startLine,
-    source: input.source,
-    sink: input.sink,
+    source: `${input.source}${input.sourceLine ? `:${input.sourceLine}` : ""}`,
+    sink: `${input.sink}${input.sinkLine ? `:${input.sinkLine}` : ""}`,
     evidence: input.evidence,
     reasoning: input.reasoning,
     remediation: input.remediation,

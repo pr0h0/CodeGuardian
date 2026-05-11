@@ -5,7 +5,7 @@ export class AnthropicProvider implements AiProvider {
   name = "anthropic";
   private client: Anthropic;
   constructor(apiKey: string, private readonly model: string) {
-    this.client = new Anthropic({ apiKey, timeout: 45_000, maxRetries: 1 });
+    this.client = new Anthropic({ apiKey, timeout: 120_000, maxRetries: 1 });
   }
   async complete(input: AiCompletionInput): Promise<AiCompletionOutput> {
     const response = await this.client.messages.create({

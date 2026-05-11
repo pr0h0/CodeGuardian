@@ -6,7 +6,9 @@ describe("ai schema", () => {
     const parsed = aiFindingSchema.safeParse({
       isFinding: true, title: "x", category: "x", severity: "high", confidence: "high", status: "suspected",
       affectedLocations: [{ path: "a", startLine: 1, endLine: 1 }],
-      source: "", sink: "", attackScenario: "", evidence: [], falsePositiveConsiderations: [], recommendedDynamicTests: [], remediation: "", secureCodeExample: null
+      source: "", sourceLine: 1, sink: "", sinkLine: 1, dataFlow: [], missingControl: "", exploitPreconditions: [], safeRepro: [],
+      exploitabilityRubric: { userControl: 1, reachability: 1, authRequired: 1, sanitizerPresent: 1, sinkDanger: 1, prodExposure: 1, score: 6 },
+      attackScenario: "", evidence: [], falsePositiveConsiderations: [], recommendedDynamicTests: [], remediation: "", secureCodeExample: null
     });
     expect(parsed.success).toBe(true);
   });

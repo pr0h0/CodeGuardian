@@ -1,12 +1,15 @@
 import dotenv from "dotenv";
 import { z } from "zod";
 import { DEFAULT_ALLOW_HOSTS, DEFAULT_CONTEXT_CHARS, DEFAULT_DB_PATH, DEFAULT_MAX_FILE_SIZE, DEFAULT_REPORT_DIR } from "./defaults.js";
+import { setRedactionEnabled } from "../utils/redact.js";
 
 dotenv.config();
 
 const envSchema = z.object({
   AI_PROVIDER: z.enum(["openai", "anthropic", "deepseek", "openrouter"]).default("openai"),
   AI_MODEL: z.string().optional().default(""),
+  AI_FAST_MODEL: z.string().optional().default(""),
+  AI_STRONG_MODEL: z.string().optional().default(""),
   AI_API_KEY: z.string().optional().default(""),
   AI_BASE_URL: z.string().optional().default(""),
   OPENAI_API_KEY: z.string().optional().default(""),
@@ -15,6 +18,8 @@ const envSchema = z.object({
   ANTHROPIC_MODEL: z.string().optional().default(""),
   DEEPSEEK_API_KEY: z.string().optional().default(""),
   DEEPSEEK_MODEL: z.string().optional().default(""),
+  DEEPSEEK_FAST_MODEL: z.string().optional().default("deepseek-v4-flash"),
+  DEEPSEEK_STRONG_MODEL: z.string().optional().default("deepseek-v4-pro"),
   DEEPSEEK_BASE_URL: z.string().optional().default("https://api.deepseek.com"),
   OPENROUTER_API_KEY: z.string().optional().default(""),
   OPENROUTER_MODEL: z.string().optional().default(""),
@@ -32,13 +37,20 @@ const envSchema = z.object({
   CODEGUARDIAN_AI_AUDIT_MAX_FILES: z.coerce.number().int().positive().default(40),
   CODEGUARDIAN_AI_AUDIT_MAX_ROUNDS: z.coerce.number().int().positive().default(6),
   CODEGUARDIAN_AI_AUDIT_MAX_CHARS: z.coerce.number().int().positive().default(160000),
-  CODEGUARDIAN_REDACT_SECRETS: z.string().optional().default("true")
+  CODEGUARDIAN_REDACT_SECRETS: z.string().optional().default("true"),
+  CODEGUARDIAN_IMAGE_SEMGREP: z.string().optional().default("semgrep/semgrep:1.99.0"),
+  CODEGUARDIAN_IMAGE_GITLEAKS: z.string().optional().default("zricethezav/gitleaks:v8.21.2"),
+  CODEGUARDIAN_IMAGE_TRIVY: z.string().optional().default("aquasec/trivy:0.56.2"),
+  CODEGUARDIAN_IMAGE_OSV: z.string().optional().default("ghcr.io/google/osv-scanner:v1.9.1"),
+  CODEGUARDIAN_IMAGE_BEARER: z.string().optional().default("bearer/bearer:1.49.0")
 });
 
 export type AppEnv = z.infer<typeof envSchema>;
 
 export function loadEnv(source: NodeJS.ProcessEnv = process.env): AppEnv {
-  return envSchema.parse(source);
+  const env = envSchema.parse(source);
+  setRedactionEnabled(boolEnv(env.CODEGUARDIAN_REDACT_SECRETS));
+  return env;
 }
 
 export function boolEnv(value: string | undefined): boolean {

@@ -8,7 +8,6 @@ export const DEFAULT_IGNORES = [
   ".next",
   ".nuxt",
   "target",
-  "bin",
   "obj",
   ".venv",
   "venv",

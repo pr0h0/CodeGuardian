@@ -1,9 +1,9 @@
-import type { ScannerResult } from "./types.js";
+import type { ScannerResult, ScannerRunResult } from "./types.js";
 import { safeJsonParse } from "../utils/safeJson.js";
-import { runDockerScanner } from "./dockerFallback.js";
+import { runDockerScanner, scannerImages } from "./dockerFallback.js";
 
-export async function runOsv(repoPath: string): Promise<{ results: ScannerResult[]; warning?: string }> {
-  const result = await runDockerScanner(repoPath, "ghcr.io/google/osv-scanner:latest", ["--format", "json", "--recursive", "/src"], 240_000);
+export async function runOsv(repoPath: string, timeoutMs = 240_000): Promise<ScannerRunResult> {
+  const result = await runDockerScanner(repoPath, scannerImages()["osv-scanner"], ["--format", "json", "--recursive", "/src"], timeoutMs);
   const warningPrefix = result.warning ? `${result.warning}; ` : "";
   const parsed = safeJsonParse<{ results?: any[] }>(result.stdout || "{}");
   if (!parsed) return { results: [], warning: `${warningPrefix}osv-scanner returned non-JSON output: ${result.stderr || result.stdout.slice(0, 300)}` };
@@ -16,7 +16,10 @@ export async function runOsv(repoPath: string): Promise<{ results: ScannerResult
       }
     }
   }
-  return { results, warning: warningPrefix || (result.code && result.code !== 1 ? result.stderr : undefined) };
+  const stderr = result.stderr.trim();
+  const benign = /no package sources found|failed to resolve gitignore/i.test(stderr);
+  const warning = warningPrefix || (result.code && /error|failed|permission|invalid|denied|panic/i.test(stderr) && !benign ? stderr : undefined);
+  return { results, warning, code: result.code };
 }
 
 function normalizeScannerPath(input: string): string {

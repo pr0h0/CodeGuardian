@@ -14,9 +14,12 @@ export interface ContextPack {
   routes: Array<{ method: string; routePath: string; startLine: number; frameworkGuess: string }>;
   configHints: Array<{ path: string; line: number; note: string }>;
   relatedResults: Array<Omit<ScannerResult, "raw">>;
+  scannerNegatives: string[];
+  aiInstructions?: string;
+  requestedContext?: unknown;
 }
 
-export function buildContextPack(result: ScannerResult, files: IndexedFile[], results: ScannerResult[], maxChars: number): ContextPack {
+export function buildContextPack(result: ScannerResult, files: IndexedFile[], results: ScannerResult[], maxChars: number, aiInstructions = ""): ContextPack {
   const target = files.find((file) => file.path === result.path);
   const snippets = [];
   let imports: string[] = [];
@@ -47,13 +50,19 @@ export function buildContextPack(result: ScannerResult, files: IndexedFile[], re
       ? [{ path: target.path, line: index + 1, note: redactSecrets(line.trim()).slice(0, 240) }]
       : []).slice(0, 20);
   }
-  let pack: ContextPack = { scannerResult: compactResult(result), snippets, imports, nearbySymbols, routes, configHints, relatedResults: results.filter((item) => item.path === result.path).slice(0, 10).map(compactResult) };
+  let pack: ContextPack = { scannerResult: compactResult(result), snippets, imports, nearbySymbols, routes, configHints, relatedResults: results.filter((item) => item.path === result.path).slice(0, 10).map(compactResult), scannerNegatives: scannerNegatives(result, results), aiInstructions: aiInstructions || undefined };
   while (JSON.stringify(pack).length > maxChars && pack.snippets.length > 0) {
     const snippet = pack.snippets[0];
     const mid = Math.floor((snippet.startLine + snippet.endLine) / 2);
     pack = { ...pack, snippets: [{ ...snippet, startLine: Math.max(snippet.startLine, mid - 10), endLine: Math.min(snippet.endLine, mid + 10) }] };
   }
   return pack;
+}
+
+function scannerNegatives(result: ScannerResult, results: ScannerResult[]): string[] {
+  const scanners = ["semgrep", "bearer", "custom-rules", "taint-lite", "config-checks"];
+  const samePath = results.filter((item) => item.path === result.path);
+  return scanners.filter((scanner) => !samePath.some((item) => item.scanner === scanner)).map((scanner) => `No ${scanner} result recorded for this file in current scan.`);
 }
 
 function compactResult(result: ScannerResult): Omit<ScannerResult, "raw"> {

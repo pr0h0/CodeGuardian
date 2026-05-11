@@ -10,6 +10,7 @@ export interface ScannerResult {
   startLine?: number;
   endLine?: number;
   message: string;
+  fingerprint?: string;
   raw?: unknown;
 }
 
@@ -28,6 +29,9 @@ export interface Finding {
   reasoning: string;
   remediation: string;
   scannerSource?: string;
+  fingerprint?: string;
+  baselineStatus?: "new" | "unchanged" | "resolved";
+  exploitabilityScore?: number;
   raw?: unknown;
 }
 
@@ -36,4 +40,10 @@ export interface ToolStatus {
   available: boolean;
   version?: string;
   error?: string;
+}
+
+export interface ScannerRunResult {
+  results: ScannerResult[];
+  warning?: string;
+  code?: number | null;
 }

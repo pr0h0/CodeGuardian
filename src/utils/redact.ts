@@ -7,7 +7,18 @@ const patterns: RegExp[] = [
   /((?:api[_-]?key|token|password|secret|passwd|pwd)\s*[:=]\s*['"]?)[^'"\s]+/gi
 ];
 
+let redactionEnabled = true;
+
+export function setRedactionEnabled(enabled: boolean): void {
+  redactionEnabled = enabled;
+}
+
+export function isRedactionEnabled(): boolean {
+  return redactionEnabled;
+}
+
 export function redactSecrets(input: string): string {
+  if (!redactionEnabled) return input;
   let output = input;
   for (const pattern of patterns) {
     output = output.replace(pattern, (match, prefix) => `${typeof prefix === "string" ? prefix : ""}[REDACTED]`);

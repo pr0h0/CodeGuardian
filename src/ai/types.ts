@@ -20,7 +20,22 @@ export const aiFindingSchema = z.object({
   status: z.enum(["confirmed", "suspected", "needs_dynamic_test", "false_positive"]),
   affectedLocations: z.array(z.object({ path: z.string(), startLine: z.number(), endLine: z.number() })),
   source: z.string(),
+  sourceLine: z.number().int().positive().nullable().default(null),
   sink: z.string(),
+  sinkLine: z.number().int().positive().nullable().default(null),
+  dataFlow: z.array(z.object({ path: z.string(), line: z.number().int().positive(), step: z.string() })).default([]),
+  missingControl: z.string().default(""),
+  exploitPreconditions: z.array(z.string()).default([]),
+  safeRepro: z.array(z.string()).default([]),
+  exploitabilityRubric: z.object({
+    userControl: z.number().min(0).max(20),
+    reachability: z.number().min(0).max(20),
+    authRequired: z.number().min(0).max(10),
+    sanitizerPresent: z.number().min(0).max(20),
+    sinkDanger: z.number().min(0).max(20),
+    prodExposure: z.number().min(0).max(10),
+    score: z.number().min(0).max(100)
+  }).default({ userControl: 0, reachability: 0, authRequired: 0, sanitizerPresent: 0, sinkDanger: 0, prodExposure: 0, score: 0 }),
   attackScenario: z.string(),
   evidence: z.array(z.object({ path: z.string(), line: z.number(), note: z.string() })),
   falsePositiveConsiderations: z.array(z.string()),
@@ -32,6 +47,8 @@ export const aiFindingSchema = z.object({
     curlCommand: z.string().nullable(),
     pocScript: z.string().nullable()
   })),
+  requestedFiles: z.array(z.string()).default([]),
+  requestedSymbols: z.array(z.string()).default([]),
   remediation: z.string(),
   secureCodeExample: z.string().nullable()
 });

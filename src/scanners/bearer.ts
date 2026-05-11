@@ -1,10 +1,10 @@
 import path from "node:path";
-import type { ScannerResult } from "./types.js";
+import type { ScannerResult, ScannerRunResult } from "./types.js";
 import { safeJsonParse } from "../utils/safeJson.js";
-import { runDockerScanner } from "./dockerFallback.js";
+import { runDockerScanner, scannerImages } from "./dockerFallback.js";
 
-export async function runBearer(repoPath: string): Promise<{ results: ScannerResult[]; warning?: string }> {
-  const result = await runDockerScanner(repoPath, "bearer/bearer:latest", ["scan", "/src", "--format", "json"], 360_000);
+export async function runBearer(repoPath: string, timeoutMs = 360_000): Promise<ScannerRunResult> {
+  const result = await runDockerScanner(repoPath, scannerImages().bearer, ["scan", "/src", "--format", "json"], timeoutMs);
   const warningPrefix = result.warning ? `${result.warning}; ` : "";
   const parsed = safeJsonParse<any>(result.stdout || "{}");
   if (!parsed) return { results: [], warning: `${warningPrefix}bearer returned non-JSON output: ${result.stderr || result.stdout.slice(0, 300)}` };
@@ -22,7 +22,8 @@ export async function runBearer(repoPath: string): Promise<{ results: ScannerRes
       message: String(item.description ?? item.message ?? item.title ?? "Bearer finding"),
       raw: item
     })),
-    warning: warningPrefix || (result.code && result.code > 1 ? result.stderr : undefined)
+    warning: warningPrefix || (result.code && result.code > 1 ? result.stderr : undefined),
+    code: result.code
   };
 }
 

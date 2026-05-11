@@ -6,8 +6,9 @@ import { createApproval, findApproved } from "./approvals.js";
 import { isAllowedHost } from "./policy.js";
 import { ensureDir } from "../utils/paths.js";
 
-export async function runPuppeteerTool(db: Db, input: { scanId?: string; target: string; allowedHosts: string[]; outDir: string; runApproved?: boolean }) {
-  if (!isAllowedHost(input.target, input.allowedHosts) && !(input.runApproved && findApproved(db, "puppeteer", input.target))) {
+export async function runPuppeteerTool(db: Db, input: { scanId?: string; target: string; allowedHosts: string[]; outDir: string; runApproved?: boolean; requireApproval?: boolean }) {
+  const requireApproval = input.requireApproval ?? true;
+  if (requireApproval && !isAllowedHost(input.target, input.allowedHosts) && !(input.runApproved && findApproved(db, "puppeteer", input.target))) {
     const id = createApproval(db, { scanId: input.scanId, actionType: "puppeteer", commandPreview: `open ${input.target}`, risk: "medium", reason: "Browser test target is not allowlisted", target: input.target });
     return { approved: false, approvalId: id };
   }

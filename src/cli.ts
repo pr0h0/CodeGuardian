@@ -10,8 +10,9 @@ import { envAllowHosts, loadEnv } from "./config/env.js";
 import { resolveApproval } from "./tools/approvals.js";
 import { runCurlTool } from "./tools/curlTool.js";
 import { runPuppeteerTool } from "./tools/puppeteerTool.js";
+import { runDoctor } from "./tools/doctor.js";
 
-function addCommonOptions(command: Command): Command {
+function addScanOptions(command: Command): Command {
   return command
     .option("--out <dir>", "output directory")
     .option("--format <format>", "markdown|json|sarif|all", "all")
@@ -19,8 +20,6 @@ function addCommonOptions(command: Command): Command {
     .option("--no-ai", "disable AI triage")
     .option("--provider <provider>", "openai|anthropic|deepseek|openrouter")
     .option("--model <model>", "AI model")
-    .option("--target <url>", "dynamic target")
-    .option("--allow-host <host>", "allow host", collect, [])
     .option("--max-files <number>", "max files", parseInt)
     .option("--max-file-size <bytes>", "max file size", parseInt)
     .option("--max-ai-findings <number>", "max high-signal scanner results to send to AI", parseInt)
@@ -31,7 +30,19 @@ function addCommonOptions(command: Command): Command {
     .option("--max-ai-audit-chars <number>", "max total source chars sent during AI exploratory audit", parseInt)
     .option("--include <glob>", "include glob", collect, [])
     .option("--exclude <glob>", "exclude glob", collect, [])
+    .option("--baseline <scanId>", "baseline scan id, latest, or none", "latest")
+    .option("--profile <profile>", "all|web|cli|php|ruby|rails|laravel|node|python")
+    .option("--incremental", "only run local deterministic scanners on changed files; external Docker scanners still scan full repo")
     .option("--fail-on <severity>", "critical|high|medium|low|none", "none")
+    .option("--verbose", "verbose logging");
+}
+
+function addIndexOptions(command: Command): Command {
+  return command
+    .option("--max-files <number>", "max files", parseInt)
+    .option("--max-file-size <bytes>", "max file size", parseInt)
+    .option("--include <glob>", "include glob", collect, [])
+    .option("--exclude <glob>", "exclude glob", collect, [])
     .option("--verbose", "verbose logging");
 }
 
@@ -44,7 +55,7 @@ export async function runCli(argv: string[]): Promise<void> {
   const program = new Command();
   program.name("codeguardian").description("AI-assisted local security scanner").version("0.1.0");
 
-  addCommonOptions(program.command("scan <repoPath>").description("Index, scan, triage, and report")).action(async (repoPath, options) => {
+  addScanOptions(program.command("scan <repoPath>").description("Index, scan, triage, and report")).action(async (repoPath, options) => {
     const ctx = createRunContext(repoPath, options);
     const result = await runScan(ctx);
     console.log(`scan ${result.scanId} complete`);
@@ -52,7 +63,7 @@ export async function runCli(argv: string[]): Promise<void> {
     process.exitCode = result.exitCode;
   });
 
-  addCommonOptions(program.command("index <repoPath>").description("Index only")).action(async (repoPath, options) => {
+  addIndexOptions(program.command("index <repoPath>").description("Index only")).action(async (repoPath, options) => {
     const ctx = createRunContext(repoPath, options);
     const db = openDatabase(path.resolve(ctx.repoPath, ctx.env.CODEGUARDIAN_DB_PATH));
     const scanId = createScan(db, ctx.repoPath, ctx.options);
@@ -76,12 +87,21 @@ export async function runCli(argv: string[]): Promise<void> {
     }
   });
 
-  program.command("test-web").requiredOption("--target <url>").option("--allow-host <host>", "allow host", collect, []).option("--out <dir>", "output directory", "codeguardian-report").option("--run-approved", "run approved actions").action(async (options) => {
+  program.command("doctor <repoPath>").description("Check local scanner environment").option("--pull", "pull pinned scanner images").action(async (repoPath, options) => {
+    const result = await runDoctor(repoPath, { pull: Boolean(options.pull) });
+    for (const line of result.lines) console.log(line);
+    process.exitCode = result.ok ? 0 : 1;
+  });
+
+  program.command("test-web").option("--target <url>", "target URL; defaults to CODEGUARDIAN_DEFAULT_TARGET").option("--allow-host <host>", "allow host", collect, []).option("--out <dir>", "output directory").option("--run-approved", "run approved actions").action(async (options) => {
     const env = loadEnv();
     const db = openDatabase(path.resolve(env.CODEGUARDIAN_DB_PATH));
+    const target = options.target ?? env.CODEGUARDIAN_DEFAULT_TARGET;
+    const outDir = path.resolve(options.out ?? env.CODEGUARDIAN_REPORT_DIR);
     const allowedHosts = [...envAllowHosts(env), ...(options.allowHost ?? [])];
-    const curl = await runCurlTool(db, { target: options.target, allowedHosts, runApproved: Boolean(options.runApproved) });
-    const browser = await runPuppeteerTool(db, { target: options.target, allowedHosts, outDir: path.resolve(options.out), runApproved: Boolean(options.runApproved) });
+    const requireApproval = env.CODEGUARDIAN_REQUIRE_APPROVAL.toLowerCase() !== "false";
+    const curl = await runCurlTool(db, { target, allowedHosts, runApproved: Boolean(options.runApproved), requireApproval });
+    const browser = await runPuppeteerTool(db, { target, allowedHosts, outDir, runApproved: Boolean(options.runApproved), requireApproval });
     console.log(JSON.stringify({ curl, browser }, null, 2));
     db.close();
   });
@@ -100,11 +120,15 @@ export async function runCli(argv: string[]): Promise<void> {
     db.close();
   });
 
-  program.command("report <scanId>").option("--out <dir>", "output directory", "codeguardian-report").option("--format <format>", "markdown|json|sarif|all", "all").action((scanId, options) => {
+  program.command("report <scanId>").option("--out <dir>", "output directory; defaults to CODEGUARDIAN_REPORT_DIR").option("--format <format>", "markdown|json|sarif|all", "all").action((scanId, options) => {
     const env = loadEnv();
     const db = openDatabase(path.resolve(env.CODEGUARDIAN_DB_PATH));
     const bundle = getScanBundle(db, scanId);
-    for (const file of writeReports(path.resolve(options.out), options.format, bundle, [])) console.log(file);
+    if (!bundle.scan) {
+      db.close();
+      throw new Error(`Scan not found: ${scanId}. Check CODEGUARDIAN_DB_PATH or use a scan id from that database.`);
+    }
+    for (const file of writeReports(path.resolve(options.out ?? env.CODEGUARDIAN_REPORT_DIR), options.format, bundle, [])) console.log(file);
     db.close();
   });
 

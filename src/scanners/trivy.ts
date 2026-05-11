@@ -1,10 +1,10 @@
 import path from "node:path";
-import type { ScannerResult } from "./types.js";
+import type { ScannerResult, ScannerRunResult } from "./types.js";
 import { safeJsonParse } from "../utils/safeJson.js";
-import { runDockerScanner } from "./dockerFallback.js";
+import { runDockerScanner, scannerImages } from "./dockerFallback.js";
 
-export async function runTrivy(repoPath: string): Promise<{ results: ScannerResult[]; warning?: string }> {
-  const result = await runDockerScanner(repoPath, "aquasec/trivy:latest", ["fs", "--format", "json", "--scanners", "vuln,secret,misconfig", "/src"], 300_000);
+export async function runTrivy(repoPath: string, timeoutMs = 300_000): Promise<ScannerRunResult> {
+  const result = await runDockerScanner(repoPath, scannerImages().trivy, ["fs", "--format", "json", "--scanners", "vuln,secret,misconfig", "/src"], timeoutMs);
   const warningPrefix = result.warning ? `${result.warning}; ` : "";
   const parsed = safeJsonParse<{ Results?: any[] }>(result.stdout || "{}");
   if (!parsed) return { results: [], warning: `${warningPrefix}trivy returned non-JSON output: ${result.stderr || result.stdout.slice(0, 300)}` };
@@ -20,7 +20,7 @@ export async function runTrivy(repoPath: string): Promise<{ results: ScannerResu
       results.push({ scanner: "trivy", ruleId: mis.ID, title: mis.Title ?? mis.ID, category: "misconfiguration", severity: map(mis.Severity), path: normalizeScannerPath(repoPath, section.Target ?? ""), message: mis.Message ?? mis.Description ?? "", raw: mis });
     }
   }
-  return { results, warning: warningPrefix || (result.code ? result.stderr : undefined) };
+  return { results, warning: warningPrefix || (result.code ? result.stderr : undefined), code: result.code };
 }
 
 function map(sev: string): ScannerResult["severity"] {

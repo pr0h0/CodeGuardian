@@ -52,13 +52,25 @@ export function insertEdge(db: Db, row: Record<string, unknown>): void {
 }
 
 export function insertScannerResult(db: Db, scanId: string, result: ScannerResult): void {
-  db.prepare(`INSERT INTO scanner_results (scan_id,scanner,rule_id,title,severity,path,start_line,end_line,message,raw_json)
-    VALUES (?,?,?,?,?,?,?,?,?,?)`).run(scanId, result.scanner, result.ruleId, result.title, result.severity, result.path ?? null, result.startLine ?? null, result.endLine ?? null, result.message, JSON.stringify(result.raw ?? {}));
+  db.prepare(`INSERT INTO scanner_results (scan_id,scanner,rule_id,title,severity,path,start_line,end_line,message,raw_json,fingerprint)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?)`).run(scanId, result.scanner, result.ruleId, result.title, result.severity, result.path ?? null, result.startLine ?? null, result.endLine ?? null, result.message, JSON.stringify(result.raw ?? {}), (result as any).fingerprint ?? null);
 }
 
 export function insertFinding(db: Db, scanId: string, finding: Finding): void {
-  db.prepare(`INSERT INTO findings (scan_id,title,category,severity,confidence,status,path,start_line,end_line,source,sink,evidence_json,reasoning,remediation,raw_json)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(scanId, finding.title, finding.category, finding.severity, finding.confidence, finding.status, finding.path ?? null, finding.startLine ?? null, finding.endLine ?? null, finding.source ?? null, finding.sink ?? null, JSON.stringify(finding.evidence), finding.reasoning, finding.remediation, JSON.stringify(finding.raw ?? {}));
+  db.prepare(`INSERT INTO findings (scan_id,title,category,severity,confidence,status,path,start_line,end_line,source,sink,evidence_json,reasoning,remediation,raw_json,fingerprint,baseline_status,exploitability_score)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(scanId, finding.title, finding.category, finding.severity, finding.confidence, finding.status, finding.path ?? null, finding.startLine ?? null, finding.endLine ?? null, finding.source ?? null, finding.sink ?? null, JSON.stringify(finding.evidence), finding.reasoning, finding.remediation, JSON.stringify(finding.raw ?? {}), (finding as any).fingerprint ?? null, (finding as any).baselineStatus ?? null, (finding as any).exploitabilityScore ?? null);
+}
+
+export function insertScannerRun(db: Db, row: Record<string, unknown>): void {
+  db.prepare(`INSERT INTO scanner_runs (scan_id,scanner,image,command,started_at,elapsed_ms,exit_code,result_count,warning,metadata_json)
+    VALUES (@scanId,@scanner,@image,@command,@startedAt,@elapsedMs,@exitCode,@resultCount,@warning,@metadataJson)`).run(row);
+}
+
+export function upsertScanCache(db: Db, repoPath: string, file: { path: string; sha256: string; language: string; lineCount: number }): void {
+  db.prepare(`INSERT INTO scan_cache (repo_path,path,sha256,language,line_count,updated_at)
+    VALUES (?,?,?,?,?,?)
+    ON CONFLICT(repo_path,path) DO UPDATE SET sha256=excluded.sha256, language=excluded.language, line_count=excluded.line_count, updated_at=excluded.updated_at`)
+    .run(repoPath, file.path, file.sha256, file.language, file.lineCount, new Date().toISOString());
 }
 
 export function getScanBundle(db: Db, scanId: string) {
@@ -66,6 +78,7 @@ export function getScanBundle(db: Db, scanId: string) {
     scan: db.prepare("SELECT * FROM scans WHERE id = ?").get(scanId),
     files: db.prepare("SELECT * FROM files WHERE scan_id = ?").all(scanId),
     scannerResults: db.prepare("SELECT * FROM scanner_results WHERE scan_id = ?").all(scanId),
+    scannerRuns: db.prepare("SELECT * FROM scanner_runs WHERE scan_id = ?").all(scanId),
     findings: db.prepare("SELECT * FROM findings WHERE scan_id = ?").all(scanId),
     approvals: db.prepare("SELECT * FROM approvals WHERE scan_id = ? OR scan_id IS NULL").all(scanId)
   };

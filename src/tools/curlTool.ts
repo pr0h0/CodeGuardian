@@ -4,9 +4,10 @@ import { createApproval, findApproved } from "./approvals.js";
 import type { Db } from "../db/database.js";
 import { redactSecrets } from "../utils/redact.js";
 
-export async function runCurlTool(db: Db, input: { scanId?: string; target: string; method?: string; allowedHosts: string[]; body?: string; runApproved?: boolean }) {
+export async function runCurlTool(db: Db, input: { scanId?: string; target: string; method?: string; allowedHosts: string[]; body?: string; runApproved?: boolean; requireApproval?: boolean }) {
   const method = (input.method ?? "GET").toUpperCase();
-  if (requestNeedsApproval(method, input.target, input.allowedHosts, input.body ?? "") && !(input.runApproved && findApproved(db, "curl", input.target))) {
+  const requireApproval = input.requireApproval ?? true;
+  if (requireApproval && requestNeedsApproval(method, input.target, input.allowedHosts, input.body ?? "") && !(input.runApproved && findApproved(db, "curl", input.target))) {
     const id = createApproval(db, { scanId: input.scanId, actionType: "curl", commandPreview: `${method} ${input.target}`, risk: method === "GET" ? "medium" : "high", reason: "Dynamic HTTP request requires approval", target: input.target });
     return { approved: false, approvalId: id };
   }

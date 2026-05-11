@@ -76,6 +76,19 @@ CREATE TABLE IF NOT EXISTS scanner_results (
   message TEXT NOT NULL,
   raw_json TEXT NOT NULL DEFAULT '{}'
 );
+CREATE TABLE IF NOT EXISTS scanner_runs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  scan_id TEXT NOT NULL,
+  scanner TEXT NOT NULL,
+  image TEXT,
+  command TEXT,
+  started_at TEXT NOT NULL,
+  elapsed_ms INTEGER NOT NULL,
+  exit_code INTEGER,
+  result_count INTEGER NOT NULL,
+  warning TEXT,
+  metadata_json TEXT NOT NULL DEFAULT '{}'
+);
 CREATE TABLE IF NOT EXISTS findings (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   scan_id TEXT NOT NULL,
@@ -95,6 +108,15 @@ CREATE TABLE IF NOT EXISTS findings (
   poc_path TEXT,
   dynamic_evidence_json TEXT,
   raw_json TEXT NOT NULL DEFAULT '{}'
+);
+CREATE TABLE IF NOT EXISTS scan_cache (
+  repo_path TEXT NOT NULL,
+  path TEXT NOT NULL,
+  sha256 TEXT NOT NULL,
+  language TEXT NOT NULL,
+  line_count INTEGER NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (repo_path, path)
 );
 CREATE TABLE IF NOT EXISTS approvals (
   id TEXT PRIMARY KEY,

@@ -1,0 +1,5 @@
+# Ignore generated reports and scanner state in this repository.
+codeguardian-report/
+.codeguardian/
+dist/
+coverage/

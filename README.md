@@ -32,11 +32,14 @@ docker compose run --rm codeguardian scan /workspace --no-ai
 
 ```bash
 codeguardian tools .
+codeguardian doctor . --pull
 codeguardian index ./some-repo
 codeguardian scan ./some-repo --no-ai --format all
 codeguardian scan ./some-repo --ai --provider openai --model gpt-4.1-mini
 codeguardian scan ./some-repo --ai --max-ai-findings 50
 codeguardian scan ./some-repo --ai --max-ai-audit-files 80 --max-ai-audit-rounds 10
+codeguardian scan ./some-repo --baseline latest
+codeguardian scan ./some-repo --profile cli --incremental
 codeguardian report <scanId>
 ```
 
@@ -45,7 +48,19 @@ AI mode has two passes:
 - Scanner-result triage: sends compact context packs for high-signal scanner findings.
 - Exploratory source audit: sends a repository manifest first, lets the AI request source files by path, then sends bounded source packs so it can look for vulnerabilities missed by scanners. This is controlled by `--no-ai-audit`, `--max-ai-audit-files`, `--max-ai-audit-rounds`, and `--max-ai-audit-chars`.
 
-Reports default to `codeguardian-report/report.md`, `report.json`, and `report.sarif`.
+Reports default to timestamped files such as `codeguardian-report/report-APP-YYYY-MM-DD-HHMMSS.md`, `.json`, and `.sarif`.
+
+Reports include baseline diff, top-fix-first ordering, grouped low-signal noise, dependency reachability hints, CWE/OWASP metadata where known, and suppressions.
+
+Suppress findings with `.codeguardianignore` or inline comments:
+
+```text
+# .codeguardianignore
+generated/
+fixtures/unsafe-example.php
+
+# codeguardian-disable-next-line php-eval -- trusted local fixture
+```
 
 ## Environment
 
@@ -72,7 +87,8 @@ DeepSeek:
 ```env
 AI_PROVIDER=deepseek
 DEEPSEEK_API_KEY=...
-DEEPSEEK_MODEL=deepseek-chat
+DEEPSEEK_FAST_MODEL=deepseek-v4-flash
+DEEPSEEK_STRONG_MODEL=deepseek-v4-pro
 DEEPSEEK_BASE_URL=https://api.deepseek.com
 ```
 
@@ -95,9 +111,45 @@ codeguardian reject <approvalId>
 codeguardian test-web --target http://dev.local:3000 --allow-host dev.local --run-approved
 ```
 
+If `--target` is omitted, `test-web` uses `CODEGUARDIAN_DEFAULT_TARGET`. Set `CODEGUARDIAN_REQUIRE_APPROVAL=false` only for trusted local targets.
+
 ## Custom Rules
 
 Edit `rules/custom/dangerous-patterns.json`. Rules use JavaScript regular expressions and produce structured scanner results with file and line evidence.
+
+## Project Config
+
+Create `.codeguardian.yml` or `.codeguardian.json` in the scanned repo:
+
+```yaml
+profile: rails
+disabledRules:
+  - quality/large-file
+severityOverrides:
+  custom-rules/debug-endpoint: low
+failOn: high
+maxAdditionalSastFindings: 100
+aiFastModel: deepseek-v4-flash
+aiStrongModel: deepseek-v4-pro
+aiCritic: true
+incremental: true
+```
+
+Profiles: `all`, `web`, `cli`, `php`, `ruby`, `rails`, `laravel`, `node`, `python`.
+
+## AI Instructions
+
+Add `AI_INSTRUCTIONS.md`, `AGENT.md`, `AGENTS.md`, or `.codeguardian/AI_INSTRUCTIONS.md` to the scanned repository to teach AI triage local invariants and known false positives.
+
+Example:
+
+```md
+- Shopify shopDomain comes from authenticated Shopify session context.
+- Do not report SSRF for post-auth shopDomain usage unless arbitrary host input bypasses Shopify validation.
+- Test fixtures and local development secrets are not production findings.
+```
+
+See `AI_INSTRUCTIONS.example.md`.
 
 ## Supported Scanners
 
@@ -107,7 +159,11 @@ Edit `rules/custom/dangerous-patterns.json`. Rules use JavaScript regular expres
 - OSV-Scanner
 - Bearer
 - Built-in custom dangerous pattern scanner
+- Built-in taint-lite source-to-sink scanner
+- Built-in framework/config posture checks
 - Lightweight quality checks
+
+Built-in language support is strongest for JS/TS, PHP, Ruby/Rails, Python, and common CLI entrypoints. Docker scanners add broader multi-language coverage.
 
 ## Limitations
 

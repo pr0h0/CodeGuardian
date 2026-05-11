@@ -1,0 +1,15 @@
+profile: all
+disabledRules:
+  - quality/large-file
+severityOverrides:
+  custom-rules/debug-endpoint: low
+failOn: none
+maxAdditionalSastFindings: 100
+maxAiFindings: 25
+maxAiAuditFiles: 40
+maxAiAuditRounds: 6
+maxAiAuditChars: 160000
+aiFastModel: deepseek-v4-flash
+aiStrongModel: deepseek-v4-pro
+aiCritic: true
+incremental: false

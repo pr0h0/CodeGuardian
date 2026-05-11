@@ -1,10 +1,10 @@
 import path from "node:path";
-import type { ScannerResult } from "./types.js";
+import type { ScannerResult, ScannerRunResult } from "./types.js";
 import { safeJsonParse } from "../utils/safeJson.js";
-import { runDockerScanner } from "./dockerFallback.js";
+import { runDockerScanner, scannerImages } from "./dockerFallback.js";
 
-export async function runSemgrep(repoPath: string): Promise<{ results: ScannerResult[]; warning?: string }> {
-  const result = await runDockerScanner(repoPath, "semgrep/semgrep:latest", ["semgrep", "--json", "--config", "auto", "/src"], 240_000);
+export async function runSemgrep(repoPath: string, timeoutMs = 240_000): Promise<ScannerRunResult> {
+  const result = await runDockerScanner(repoPath, scannerImages().semgrep, ["semgrep", "--json", "--config", "auto", "/src"], timeoutMs);
   const warningPrefix = result.warning ? `${result.warning}; ` : "";
   const parsed = safeJsonParse<{ results?: any[] }>(result.stdout || "{}");
   if (!parsed) return { results: [], warning: `${warningPrefix}semgrep returned non-JSON output: ${result.stderr || result.stdout.slice(0, 300)}` };
@@ -19,7 +19,7 @@ export async function runSemgrep(repoPath: string): Promise<{ results: ScannerRe
     message: item.extra?.message ?? "",
     raw: item
   }));
-  return { results, warning: warningPrefix || (result.code && result.code > 1 ? result.stderr : undefined) };
+  return { results, warning: warningPrefix || (result.code && result.code > 1 ? result.stderr : undefined), code: result.code };
 }
 
 function mapSeverity(sev: string): ScannerResult["severity"] {

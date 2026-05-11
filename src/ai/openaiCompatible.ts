@@ -5,7 +5,7 @@ export class OpenAiCompatibleProvider implements AiProvider {
   private client: OpenAI;
 
   constructor(public readonly name: string, apiKey: string, private readonly model: string, baseURL: string) {
-    this.client = new OpenAI({ apiKey, baseURL, timeout: 45_000, maxRetries: 1 });
+    this.client = new OpenAI({ apiKey, baseURL, timeout: 120_000, maxRetries: 1 });
   }
 
   async complete(input: AiCompletionInput): Promise<AiCompletionOutput> {
