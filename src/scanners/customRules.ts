@@ -34,6 +34,7 @@ export function runCustomRules(files: IndexedFile[], rules = loadCustomRules()):
       if (rule.extensions && !rule.extensions.includes(ext)) continue;
       const regex = new RegExp(rule.regex, "gim");
       for (const match of file.content.matchAll(regex)) {
+        if (shouldSkipMatch(rule, match[0])) continue;
         const line = lineAtOffset(file.content, match.index ?? 0);
         results.push({
           scanner: "custom-rules",
@@ -51,6 +52,34 @@ export function runCustomRules(files: IndexedFile[], rules = loadCustomRules()):
     }
   }
   return results;
+}
+
+function shouldSkipMatch(rule: Rule, text: string): boolean {
+  if (rule.category !== "secrets") return false;
+  const assignedValue = text.match(/[:=]\s*(.+)$/s)?.[1]?.trim();
+  if (!assignedValue) return false;
+
+  return isRuntimeSecretReference(assignedValue);
+}
+
+function isRuntimeSecretReference(value: string): boolean {
+  const normalized = value.replace(/[),;\]}]+$/g, "").trim();
+  return [
+    /^process\.env(?:\.[A-Z0-9_]+|\[['"][A-Z0-9_]+['"]\])$/i,
+    /^import\.meta\.env(?:\.[A-Z0-9_]+|\[['"][A-Z0-9_]+['"]\])$/i,
+    /^Deno\.env\.get\($/i,
+    /^Deno\.env\.get\(\s*['"]$/i,
+    /^Deno\.env\.get\(\s*['"][A-Z0-9_]+['"]?\s*$/i,
+    /^ENV\[$/i,
+    /^ENV\[\s*['"]$/i,
+    /^ENV\[\s*['"][A-Z0-9_]+['"]\s*$/i,
+    /^os\.environ(?:\.get\(|\[)$/i,
+    /^os\.environ(?:\.get\(\s*['"]|\[\s*['"])$/i,
+    /^os\.environ(?:\.get\(\s*['"][A-Z0-9_]+['"]?\s*|\[\s*['"][A-Z0-9_]+['"]?\s*)$/i,
+    /^getenv\($/i,
+    /^getenv\(\s*['"]$/i,
+    /^getenv\(\s*['"][A-Z0-9_]+['"]?\s*$/i
+  ].some((pattern) => pattern.test(normalized));
 }
 
 function enrichRule(rule: Rule): Rule {

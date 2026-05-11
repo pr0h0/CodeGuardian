@@ -38,6 +38,35 @@ describe("custom rules", () => {
     expect(results.some((result) => result.ruleId === "ruby-command-exec-user-input")).toBe(true);
   });
 
+  it("does not flag secret assignments loaded from runtime environment", () => {
+    const results = runCustomRules([
+      file("src/config.ts", "typescript", [
+        "const apiKey = process.env.API_KEY;",
+        "const token = import.meta.env.VITE_TOKEN;",
+        "const secret = Deno.env.get(\"APP_SECRET\");"
+      ].join("\n")),
+      file("settings.py", "python", [
+        "api_key = os.environ[\"API_KEY\"]",
+        "token = getenv(\"SERVICE_TOKEN\")"
+      ].join("\n")),
+      file("config.ru", "ruby", "secret = ENV[\"APP_SECRET\"]")
+    ]);
+
+    expect(results.filter((result) => result.category === "secrets")).toHaveLength(0);
+  });
+
+  it("still flags hardcoded secret literals", () => {
+    const results = runCustomRules([
+      file("src/config.ts", "typescript", [
+        "const apiKey = \"abcdef1234567890\";",
+        "const token = \"hardcoded-token-value\";"
+      ].join("\n")),
+      file(".env", "unknown", "API_KEY=abcdef1234567890")
+    ]);
+
+    expect(results.filter((result) => result.ruleId === "generic-secret-assignment")).toHaveLength(3);
+  });
+
   it("keeps bundled rule regexes valid", () => {
     for (const rule of loadCustomRules()) {
       expect(() => new RegExp(rule.regex, "gim")).not.toThrow();
