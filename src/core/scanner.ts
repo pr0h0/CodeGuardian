@@ -11,6 +11,7 @@ import { runTrivy } from "../scanners/trivy.js";
 import { runOsv } from "../scanners/osv.js";
 import { runBearer } from "../scanners/bearer.js";
 import { runTaintLite } from "../scanners/taintLite.js";
+import { runTaintFlow } from "../scanners/taintFlow.js";
 import { runConfigChecks } from "../scanners/configChecks.js";
 import { applySuppressions } from "../scanners/suppressions.js";
 import { deterministicFinding, aiTriage } from "../ai/triage.js";
@@ -21,6 +22,8 @@ import { loadAiInstructions } from "../repo/aiInstructions.js";
 import { writeJsonReport } from "../reports/json.js";
 import { writeMarkdownReport } from "../reports/markdown.js";
 import { writeSarifReport } from "../reports/sarif.js";
+import { writeHtmlReport } from "../reports/html.js";
+import { writeRuleExport } from "../reports/ruleExport.js";
 import type { RunContext } from "./runContext.js";
 import { DEFAULT_DB_PATH, SEVERITY_ORDER } from "../config/defaults.js";
 import { checkTool } from "../tools/commandRunner.js";
@@ -84,6 +87,9 @@ export async function runScan(ctx: RunContext): Promise<{ scanId: string; report
     ctx.logger.info("scanners: running taint-lite");
     const taintResults = runTaintLite(localFiles);
     ctx.logger.info(`scanners: taint-lite produced ${taintResults.length} results`);
+    ctx.logger.info("scanners: running taint-flow");
+    const taintFlowResults = runTaintFlow(localFiles);
+    ctx.logger.info(`scanners: taint-flow produced ${taintFlowResults.length} results`);
     ctx.logger.info("scanners: running config checks");
     const configResults = runConfigChecks(localFiles);
     ctx.logger.info(`scanners: config checks produced ${configResults.length} results`);
@@ -102,6 +108,7 @@ export async function runScan(ctx: RunContext): Promise<{ scanId: string; report
     const rawScannerResults = [
       ...customResults,
       ...taintResults,
+      ...taintFlowResults,
       ...configResults,
       ...qualityResults,
       ...scanners.flatMap((scan) => {
@@ -142,7 +149,7 @@ export async function runScan(ctx: RunContext): Promise<{ scanId: string; report
     } else if (aiProvider) {
       ctx.logger.info("ai-audit: disabled");
     }
-    const finalFindings = attachFindingFingerprints(findings).map((finding) => ({ ...finding, exploitabilityScore: localExploitabilityScore(finding) }));
+    const finalFindings = applyTriageMemory(db, ctx.repoPath, scanId, attachFindingFingerprints(findings.map(classifyFindingState))).map((finding) => ({ ...finding, exploitabilityScore: localExploitabilityScore(finding) }));
     ctx.logger.info(`triage: produced ${finalFindings.length} findings`);
     ctx.logger.info("db: storing findings");
     for (const finding of finalFindings) insertFinding(db, scanId, finding);
@@ -229,14 +236,49 @@ function localExploitabilityScore(finding: Finding): number {
   const text = `${finding.category} ${finding.path ?? ""} ${finding.source ?? ""} ${finding.sink ?? ""}`.toLowerCase();
   if (/(route|controller|api|admin|auth|bin\/|cli)/.test(text)) score += 8;
   if (/(secret|command|deserialization|ssrf)/.test(text)) score += 8;
+  if (finding.status === "confirmed_true_positive") score += 8;
+  if (finding.status === "likely_true_positive") score += 3;
+  if (finding.status === "security_hotspot" || finding.status === "needs_context") score -= 8;
   if (finding.status === "false_positive") score = 0;
   return Math.max(0, Math.min(100, Math.round(score)));
+}
+
+function classifyFindingState(finding: Finding): Finding {
+  if (finding.status === "false_positive") return finding;
+  if (finding.status === "needs_dynamic_test") return { ...finding, status: "security_hotspot" };
+  if (finding.status === "confirmed" && ["confirmed", "high"].includes(finding.confidence)) return { ...finding, status: "confirmed_true_positive" };
+  if (finding.confidence === "high" && ["critical", "high"].includes(finding.severity)) return { ...finding, status: "likely_true_positive" };
+  if (finding.confidence === "low") return { ...finding, status: "needs_context" };
+  return finding;
+}
+
+function applyTriageMemory(db: ReturnType<typeof openDatabase>, repoPath: string, scanId: string, findings: Finding[]): Finding[] {
+  const rows = db.prepare(`
+    SELECT f.fingerprint, f.status, f.reasoning
+    FROM findings f
+    JOIN scans s ON s.id = f.scan_id
+    WHERE s.repo_path = ? AND f.scan_id != ? AND f.fingerprint IS NOT NULL
+    ORDER BY s.started_at DESC
+  `).all(repoPath, scanId) as Array<{ fingerprint: string; status: Finding["status"]; reasoning?: string }>;
+  const memory = new Map<string, { status: Finding["status"]; reasoning?: string }>();
+  for (const row of rows) if (!memory.has(row.fingerprint)) memory.set(row.fingerprint, row);
+  return findings.map((finding) => {
+    const remembered = finding.fingerprint ? memory.get(finding.fingerprint) : undefined;
+    if (!remembered) return finding;
+    if (remembered.status === "false_positive") {
+      return { ...finding, status: "false_positive", confidence: "low", reasoning: `${finding.reasoning}\nTriage memory: previous scan marked this fingerprint false_positive. ${remembered.reasoning ?? ""}` };
+    }
+    if (remembered.status === "confirmed_true_positive" || remembered.status === "confirmed") {
+      return { ...finding, status: "confirmed_true_positive", confidence: finding.confidence === "low" ? "medium" : finding.confidence, reasoning: `${finding.reasoning}\nTriage memory: previous scan confirmed this fingerprint as true positive.` };
+    }
+    return finding;
+  });
 }
 
 function scoreScannerResult(result: { scanner: string; severity: string; category?: string; path?: string; raw?: unknown }): number {
   const severityScore: Record<string, number> = { critical: 100, high: 80, medium: 50, low: 20, info: 5 };
   let score = severityScore[result.severity] ?? 10;
-  if (["taint-lite", "gitleaks", "config-checks"].includes(result.scanner)) score += 12;
+  if (["taint-flow", "taint-lite", "gitleaks", "config-checks"].includes(result.scanner)) score += 12;
   if (/(route|controller|auth|admin|api|bin\/|cli|command|worker|job)/i.test(result.path ?? "")) score += 10;
   if (["command-injection", "deserialization", "ssrf", "secrets"].includes(result.category ?? "")) score += 8;
   if (String(JSON.stringify(result.raw ?? {})).includes("sourceLine")) score += 8;
@@ -273,13 +315,16 @@ export function writeReports(outDir: string, format: string, bundle: unknown, wa
   const files: string[] = [];
   if (format === "json" || format === "all") files.push(writeJsonReport(outDir, bundle, reportBase));
   if (format === "markdown" || format === "all") files.push(writeMarkdownReport(outDir, bundle, warnings, reportBase));
+  if (format === "html" || format === "all") files.push(writeHtmlReport(outDir, bundle, warnings, reportBase));
   if (format === "sarif" || format === "all") files.push(writeSarifReport(outDir, bundle, reportBase));
+  const ruleExport = writeRuleExport(outDir, bundle, reportBase);
+  if (ruleExport) files.push(ruleExport);
   return files;
 }
 
 function cleanupUnrequestedReports(outDir: string, format: string): void {
   if (format === "all") return;
-  const keepExt = format === "markdown" ? ".md" : format === "json" ? ".json" : format === "sarif" ? ".sarif" : "";
+  const keepExt = format === "markdown" ? ".md" : format === "html" ? ".html" : format === "json" ? ".json" : format === "sarif" ? ".sarif" : "";
   if (!fs.existsSync(outDir)) return;
   for (const entry of fs.readdirSync(outDir)) {
     if (!entry.startsWith("report")) continue;

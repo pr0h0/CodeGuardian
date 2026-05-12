@@ -15,7 +15,7 @@ import { runDoctor } from "./tools/doctor.js";
 function addScanOptions(command: Command): Command {
   return command
     .option("--out <dir>", "output directory")
-    .option("--format <format>", "markdown|json|sarif|all", "all")
+    .option("--format <format>", "markdown|html|json|sarif|all", "all")
     .option("--ai", "enable AI triage")
     .option("--no-ai", "disable AI triage")
     .option("--provider <provider>", "openai|anthropic|deepseek|openrouter")

@@ -17,7 +17,7 @@ export const aiFindingSchema = z.object({
   category: z.string(),
   severity: z.enum(["critical", "high", "medium", "low", "info"]),
   confidence: z.enum(["confirmed", "high", "medium", "low"]),
-  status: z.enum(["confirmed", "suspected", "needs_dynamic_test", "false_positive"]),
+  status: z.enum(["confirmed", "confirmed_true_positive", "likely_true_positive", "security_hotspot", "needs_context", "suspected", "needs_dynamic_test", "false_positive"]),
   affectedLocations: z.array(z.object({ path: z.string(), startLine: z.number(), endLine: z.number() })),
   source: z.string(),
   sourceLine: z.number().int().positive().nullable().default(null),

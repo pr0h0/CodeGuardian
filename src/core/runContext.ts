@@ -7,7 +7,7 @@ import { loadProjectConfig, type ProjectConfig, type Profile } from "../config/p
 
 export interface CliOptions {
   out?: string;
-  format?: "markdown" | "json" | "sarif" | "all";
+  format?: "markdown" | "html" | "json" | "sarif" | "all";
   ai?: boolean;
   provider?: "openai" | "anthropic" | "deepseek" | "openrouter";
   model?: string;

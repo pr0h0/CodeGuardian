@@ -19,7 +19,7 @@ export interface Finding {
   category: string;
   severity: Severity;
   confidence: "confirmed" | "high" | "medium" | "low";
-  status: "confirmed" | "suspected" | "needs_dynamic_test" | "false_positive";
+  status: "confirmed" | "confirmed_true_positive" | "likely_true_positive" | "security_hotspot" | "needs_context" | "suspected" | "needs_dynamic_test" | "false_positive";
   path?: string;
   startLine?: number;
   endLine?: number;

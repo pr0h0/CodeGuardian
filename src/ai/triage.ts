@@ -9,7 +9,7 @@ const criticSchema = z.object({
   verdict: z.enum(["keep", "downgrade", "reject"]),
   confidence: z.enum(["high", "medium", "low"]),
   reasons: z.array(z.string()).default([]),
-  revisedStatus: z.enum(["confirmed", "suspected", "needs_dynamic_test", "false_positive"]),
+  revisedStatus: z.enum(["confirmed", "confirmed_true_positive", "likely_true_positive", "security_hotspot", "needs_context", "suspected", "needs_dynamic_test", "false_positive"]),
   revisedConfidence: z.enum(["confirmed", "high", "medium", "low"])
 });
 

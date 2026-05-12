@@ -7,6 +7,7 @@ import { safeJsonParse } from "../utils/safeJson.js";
 import { extractImports } from "../repo/importGraph.js";
 import { detectRoutes } from "../repo/routeDetector.js";
 import { extractSymbols } from "../repo/symbolExtractor.js";
+import { lineSlice } from "../utils/lineMap.js";
 import type { AiMessage, AiProvider } from "./types.js";
 
 const auditFindingSchema = z.object({
@@ -14,7 +15,7 @@ const auditFindingSchema = z.object({
   category: z.string(),
   severity: z.enum(["critical", "high", "medium", "low", "info"]),
   confidence: z.enum(["confirmed", "high", "medium", "low"]),
-  status: z.enum(["confirmed", "suspected", "needs_dynamic_test", "false_positive"]).default("suspected"),
+  status: z.enum(["confirmed", "confirmed_true_positive", "likely_true_positive", "security_hotspot", "needs_context", "suspected", "needs_dynamic_test", "false_positive"]).default("suspected"),
   path: z.string(),
   startLine: z.number().int().positive().optional(),
   endLine: z.number().int().positive().optional(),
@@ -31,9 +32,19 @@ const auditFindingSchema = z.object({
   remediation: z.string()
 });
 
+const auditToolCallSchema = z.object({
+  type: z.enum(["read_file", "search_text", "search_symbol", "find_category"]),
+  path: z.string().optional(),
+  query: z.string().optional(),
+  symbol: z.string().optional(),
+  category: z.string().optional(),
+  reason: z.string().optional()
+});
+
 const auditResponseSchema = z.object({
   summary: z.string().default(""),
   requestedFiles: z.array(z.string()).default([]),
+  toolCalls: z.array(auditToolCallSchema).default([]),
   complete: z.boolean().default(false),
   findings: z.array(auditFindingSchema).default([])
 });
@@ -50,10 +61,34 @@ interface ManifestEntry {
   language: string;
   lines: number;
   imports: string[];
+  localImports: string[];
   routes: Array<{ method: string; path: string; line: number; framework: string }>;
   symbols: Array<{ name: string; kind: string; line: number }>;
   hasScannerResult: boolean;
   priorityHints: string[];
+  frameworkHints: string[];
+  securityInventory: SecurityInventory;
+}
+
+interface AuditTarget {
+  path: string;
+  startLine: number;
+  endLine: number;
+  chunkIndex: number;
+  chunkCount: number;
+}
+
+interface AuditMemory {
+  inspectedFiles: Set<string>;
+  inspectedRanges: Map<string, Array<{ startLine: number; endLine: number }>>;
+  notes: Array<{ path: string; note: string }>;
+}
+
+interface SecurityInventory {
+  entrypoints: Array<{ kind: string; line: number; detail: string }>;
+  trustBoundaries: Array<{ line: number; detail: string }>;
+  sinks: Array<{ category: string; line: number; detail: string }>;
+  guards: Array<{ line: number; detail: string }>;
 }
 
 export async function runExploratoryAudit(
@@ -64,59 +99,55 @@ export async function runExploratoryAudit(
   log: (message: string) => void = () => undefined
 ): Promise<Finding[]> {
   const candidates = files.filter(isAuditableFile);
-  const manifest = buildManifest(candidates, scannerResults);
+  const manifest = buildManifest(candidates, scannerResults, files);
   const allowed = new Map(candidates.map((file) => [file.path, file]));
-  const inspected = new Set<string>();
+  const importGraph = buildImportGraph(candidates, files);
+  const chunks = buildAuditChunks(candidates);
+  const traversal = createAuditTraversal(candidates, scannerResults, importGraph, chunks);
+  const memory: AuditMemory = { inspectedFiles: new Set(), inspectedRanges: new Map(), notes: [] };
   const findings: Finding[] = [];
   let remainingChars = options.maxChars;
-  let requested = await requestInitialFiles(provider, manifest, log, options.aiInstructions ?? "");
-  if (!requested.length) requested = heuristicEntryFiles(candidates, scannerResults);
+  let requested = traversal.next(memory, 6, options.maxFiles);
   const messages: AiMessage[] = [{ role: "user", content: buildInitialPrompt(manifest, options) }];
+  log(`ai-audit: breadth-first initial targets=${requested.length}`);
 
   for (let round = 1; round <= options.maxRounds; round++) {
-    const paths = normalizeRequestedPaths(requested, allowed, inspected).slice(0, Math.max(0, options.maxFiles - inspected.size));
-    if (!paths.length) {
+    const targets = normalizeRequestedTargets(requested, allowed, memory, options.maxFiles);
+    if (!targets.length) {
       log(`ai-audit: round ${round}/${options.maxRounds} no new files requested`);
       break;
     }
-    const pack = buildFilePack(paths.map((filePath) => allowed.get(filePath)!), remainingChars);
+    const pack = buildFilePack(targets, allowed, remainingChars, importGraph, memory);
     if (!pack.files.length) {
       log(`ai-audit: round ${round}/${options.maxRounds} source char budget exhausted`);
       break;
     }
-    for (const file of pack.files) inspected.add(file.path);
+    for (const file of pack.files) {
+      rememberRange(memory, file.path, file.startLine, file.endLine);
+      memory.inspectedFiles.add(file.path);
+      memory.notes.push({ path: file.path, note: summarizeInventory(file.securityInventory) });
+    }
+    traversal.enqueueImports(pack.files.map((file) => file.path));
     remainingChars -= pack.charCount;
-    log(`ai-audit: round ${round}/${options.maxRounds} sending files=${pack.files.length} inspected=${inspected.size}/${options.maxFiles} chars=${pack.charCount} remaining=${remainingChars}`);
-    messages.push({ role: "user", content: buildAuditRoundPrompt(pack, [...inspected]) });
+    log(`ai-audit: round ${round}/${options.maxRounds} sending chunks=${pack.files.length} inspectedFiles=${memory.inspectedFiles.size}/${options.maxFiles} chars=${pack.charCount} remaining=${remainingChars}`);
+    messages.push({ role: "user", content: buildAuditRoundPrompt(pack, memory) });
     const parsed = await requestAuditRound(provider, messages, log, round);
     messages.push({ role: "assistant", content: JSON.stringify(parsed) });
-    findings.push(...parsed.findings.map((finding) => toFinding(finding)));
-    requested = parsed.requestedFiles;
-    log(`ai-audit: round ${round}/${options.maxRounds} findings=${parsed.findings.length} requested=${requested.length} complete=${parsed.complete}`);
-    if (parsed.complete || inspected.size >= options.maxFiles || remainingChars <= 0) break;
-    if (!requested.length) requested = nextUnseenHeuristicFiles(candidates, scannerResults, inspected);
+    const validFindings = parsed.findings.filter((finding) => isSupportedAuditFinding(finding, allowed, memory));
+    const dropped = parsed.findings.length - validFindings.length;
+    if (dropped) log(`ai-audit: round ${round}/${options.maxRounds} dropped unsupported findings=${dropped}`);
+    findings.push(...validFindings.map((finding) => toFinding(finding)));
+    traversal.enqueueRequested(parsed.requestedFiles);
+    const toolTargets = resolveToolCalls(parsed.toolCalls, allowed, memory);
+    if (toolTargets.length) log(`ai-audit: round ${round}/${options.maxRounds} tool targets=${toolTargets.length}`);
+    traversal.enqueueTargets(toolTargets);
+    requested = traversal.next(memory, 6, options.maxFiles);
+    log(`ai-audit: round ${round}/${options.maxRounds} findings=${parsed.findings.length} requested=${requested.length} toolCalls=${parsed.toolCalls.length} complete=${parsed.complete}`);
+    if (memory.inspectedFiles.size >= options.maxFiles || remainingChars <= 0) break;
   }
 
-  log(`ai-audit: complete inspected=${inspected.size} findings=${findings.length}`);
+  log(`ai-audit: complete inspected=${memory.inspectedFiles.size} findings=${findings.length}`);
   return dedupeFindings(findings);
-}
-
-async function requestInitialFiles(provider: AiProvider, manifest: unknown, log: (message: string) => void, aiInstructions: string): Promise<string[]> {
-  log("ai-audit: asking AI to choose initial files from manifest");
-  const output = await provider.complete({
-    system: buildAuditSystemPrompt(),
-    messages: [{ role: "user", content: buildInitialPrompt(manifest, { maxFiles: 10, maxRounds: 1, maxChars: 30000, aiInstructions }) }],
-    temperature: 0,
-    maxTokens: 1800
-  });
-  const parsed = normalizeAuditResponse(safeJsonParse(output.text));
-  const checked = auditResponseSchema.safeParse(parsed);
-  if (!checked.success) {
-    log("ai-audit: initial file selection invalid, using heuristic entries");
-    return [];
-  }
-  log(`ai-audit: initial AI requested ${checked.data.requestedFiles.length} files`);
-  return checked.data.requestedFiles;
 }
 
 async function requestAuditRound(provider: AiProvider, messages: AiMessage[], log: (message: string) => void, round: number): Promise<z.infer<typeof auditResponseSchema>> {
@@ -127,10 +158,20 @@ async function requestAuditRound(provider: AiProvider, messages: AiMessage[], lo
     maxTokens: 3500
   });
   const parsed = normalizeAuditResponse(safeJsonParse(output.text));
-  const checked = auditResponseSchema.safeParse(parsed);
+  let checked = auditResponseSchema.safeParse(parsed);
   if (!checked.success) {
-    log(`ai-audit: round ${round} invalid JSON/schema, continuing with no findings`);
-    return { summary: "Invalid AI audit response", requestedFiles: [], complete: false, findings: [] };
+    log(`ai-audit: round ${round} invalid JSON/schema, repairing`);
+    const repair = await provider.complete({
+      system: "Repair invalid JSON to match this schema exactly: {summary:string, requestedFiles:string[], complete:boolean, findings:array}. Output JSON only.",
+      messages: [{ role: "user", content: output.text }],
+      temperature: 0,
+      maxTokens: 2500
+    });
+    checked = auditResponseSchema.safeParse(normalizeAuditResponse(safeJsonParse(repair.text)));
+    if (!checked.success) {
+      log(`ai-audit: round ${round} repair failed, continuing with no findings`);
+      return { summary: "Invalid AI audit response", requestedFiles: [], toolCalls: [], complete: false, findings: [] };
+    }
   }
   return checked.data;
 }
@@ -138,27 +179,35 @@ async function requestAuditRound(provider: AiProvider, messages: AiMessage[], lo
 function buildAuditSystemPrompt(): string {
   return [
     "Role: senior application security auditor.",
-    "Goal: find source-code vulnerabilities missed by deterministic SAST scanners.",
-    "You first receive a repository manifest, then selected source files.",
+    "Goal: validate concrete source-code vulnerabilities missed by deterministic SAST scanners.",
+    "You receive a repository manifest, then breadth-first source chunks: entrypoints first, local imports next, then remaining files.",
     "Honor repository AI instructions as local security context and use them to reject known false positives unless supplied source contradicts them.",
-    "Audit by attack surface priority: external routes, auth/session, upload/download, webhooks, CLI args, background jobs, crypto/secrets, dependency usage.",
-    "Use targeted passes: list sources, list sinks, trace source-to-sink, then check sanitizers/guards.",
+    "For each batch, audit every supplied chunk top to bottom. Use memoryNotes for earlier chunks and localImports for cross-file flows.",
+    "Use a two-phase strategy: broad sweep first to identify all sources, sinks, auth boundaries, framework guards, and suspicious cross-file flows; deep confirmation next for only promising signals.",
+    "You may request toolCalls instead of guessing: read_file for exact paths, search_text for literal terms/patterns, search_symbol for functions/classes, find_category for source/sink categories such as ssrf, command-injection, path-traversal, xss, auth, secrets, crypto.",
+    "Tool calls are fulfilled by the scanner in later rounds. Never pretend tool results exist until supplied in source packs.",
+    "First produce internal hypotheses. Then try to disprove each one by checking guards, framework invariants, sanitizers, reachability, and test/dev-only context. Return only findings that survive this critic pass.",
+    "Use this pass order: identify entrypoints, identify trust boundaries, identify dangerous sinks, trace source-to-sink, then check sanitizers/guards.",
     "Request more files by exact path when needed. Do not ask for generated, lockfile, binary, or dependency code.",
     "Only report vulnerabilities supported by supplied source code. Do not invent files or line numbers.",
+    "Do not report runtime environment references such as process.env.API_KEY, import.meta.env.KEY, os.environ['KEY'], getenv('KEY'), or ENV['KEY'] as hardcoded secrets.",
+    "If source, sink, missing control, and exploit preconditions are not all visible in supplied code, request more files or report nothing.",
+    "Prefer no finding over a weak finding.",
+    "Use category rubrics: auth requires missing authorization on reachable sensitive action; SSRF requires user-controlled URL reaching outbound request without allowlist; path traversal requires user path reaching filesystem without normalization/base check; command injection requires user input reaching shell command; XSS requires untrusted HTML/script reaching render sink without escaping; secrets require literal committed secret value, not runtime env reference; crypto requires weak primitive or unsafe key/IV usage; CSRF/CORS requires browser-reachable state change or credential exposure.",
     "Focus on auth/authz, tenant isolation, injection, XSS, SSRF, path traversal, file upload, crypto misuse, webhooks, CORS/CSRF/session bugs, secrets, unsafe redirects, unsafe dynamic execution.",
-    "Return one JSON object only: {summary, requestedFiles, complete, findings}. findings must include title, category, severity, confidence, status, path, startLine, endLine, source, sourceLine, sink, sinkLine, dataFlow, missingControl, exploitPreconditions, safeRepro, evidence, reasoning, remediation."
+    "Return one JSON object only: {summary, requestedFiles, toolCalls, complete, findings}. findings must include title, category, severity, confidence, status, path, startLine, endLine, source, sourceLine, sink, sinkLine, dataFlow, missingControl, exploitPreconditions, safeRepro, evidence, reasoning, remediation."
   ].join("\n");
 }
 
 function buildInitialPrompt(manifest: unknown, options: AiExploratoryAuditOptions): string {
-  return `Repository manifest follows. Select entry points or security-critical files to inspect first.
+  return `Repository manifest follows. The scanner will choose deterministic breadth-first entry points first, then local imports, then remaining files. Use this manifest only to understand repository shape and request exact follow-up files when needed.
 
 Caps:
 - max files you may inspect this audit: ${options.maxFiles}
 - max request rounds: ${options.maxRounds}
 - max source chars: ${options.maxChars}
 
-Return JSON only with requestedFiles. Do not include findings until source file contents are supplied.
+Do not return findings until source file contents are supplied.
 
 Repository AI instructions:
 ${options.aiInstructions || "None supplied."}
@@ -167,11 +216,14 @@ Manifest:
 ${JSON.stringify(manifest, null, 2)}`;
 }
 
-function buildAuditRoundPrompt(pack: unknown, inspected: string[]): string {
+function buildAuditRoundPrompt(pack: unknown, memory: AuditMemory): string {
   return `Audit these source files for vulnerabilities not necessarily reported by scanners.
 
-Already inspected:
-${inspected.map((file) => `- ${file}`).join("\n")}
+Already inspected files:
+${[...memory.inspectedFiles].map((file) => `- ${file}`).join("\n")}
+
+Memory notes:
+${memory.notes.slice(-40).map((item) => `- ${item.path}: ${item.note}`).join("\n") || "- none"}
 
 Source pack:
 ${JSON.stringify(pack, null, 2)}
@@ -180,6 +232,12 @@ Return JSON only:
 {
   "summary": "short summary",
   "requestedFiles": ["exact/path.ts"],
+  "toolCalls": [
+    {"type":"read_file","path":"exact/path.ts","reason":"need callee"},
+    {"type":"search_text","query":"dangerousFunction","reason":"find callers"},
+    {"type":"search_symbol","symbol":"handlerName","reason":"find definition"},
+    {"type":"find_category","category":"ssrf","reason":"find outbound sinks"}
+  ],
   "complete": false,
   "findings": [
     {
@@ -187,7 +245,7 @@ Return JSON only:
       "category": "auth | ssrf | xss | injection | secrets | weak-crypto | ...",
       "severity": "critical | high | medium | low | info",
       "confidence": "confirmed | high | medium | low",
-      "status": "confirmed | suspected | needs_dynamic_test | false_positive",
+      "status": "confirmed | confirmed_true_positive | likely_true_positive | security_hotspot | needs_context | suspected | needs_dynamic_test | false_positive",
       "path": "exact/path.ts",
       "startLine": 1,
       "endLine": 1,
@@ -207,8 +265,9 @@ Return JSON only:
 }`;
 }
 
-function buildManifest(files: IndexedFile[], scannerResults: ScannerResult[]): ManifestEntry[] {
+function buildManifest(files: IndexedFile[], scannerResults: ScannerResult[], allFiles = files): ManifestEntry[] {
   const scannerPaths = new Set(scannerResults.map((result) => result.path).filter(Boolean));
+  const importGraph = buildImportGraph(files, allFiles);
   return files.map((file) => {
     const routes = detectRoutes(file.path, file.content).slice(0, 12);
     const symbols = extractSymbols(file.content).slice(0, 25);
@@ -217,54 +276,366 @@ function buildManifest(files: IndexedFile[], scannerResults: ScannerResult[]): M
       language: file.language,
       lines: file.lineCount,
       imports: extractImports(file.content).slice(0, 30),
+      localImports: (importGraph.get(file.path) ?? []).slice(0, 30),
       routes: routes.map((route) => ({ method: route.method, path: route.routePath, line: route.startLine, framework: route.frameworkGuess })),
       symbols: symbols.map((symbol) => ({ name: symbol.name, kind: symbol.kind, line: symbol.startLine })),
       hasScannerResult: scannerPaths.has(file.path),
-      priorityHints: priorityHints(file)
+      priorityHints: priorityHints(file),
+      frameworkHints: frameworkHints(file),
+      securityInventory: buildSecurityInventory(file)
     };
   }).sort((a, b) => scoreManifestFile(b) - scoreManifestFile(a));
 }
 
-function buildFilePack(files: IndexedFile[], charBudget: number) {
-  const output: Array<{ path: string; language: string; lines: number; content: string }> = [];
+function buildFilePack(targets: AuditTarget[], allowed: Map<string, IndexedFile>, charBudget: number, importGraph: Map<string, string[]>, memory: AuditMemory) {
+  const output: Array<{ path: string; language: string; lines: number; startLine: number; endLine: number; chunkIndex: number; chunkCount: number; localImports: string[]; frameworkHints: string[]; securityInventory: SecurityInventory; previousNotes: string[]; content: string }> = [];
   let charCount = 0;
-  for (const file of files) {
-    const content = safeFileContent(file);
+  for (const target of targets) {
+    const file = allowed.get(target.path);
+    if (!file) continue;
+    const content = safeFileContent(file, target.startLine, target.endLine);
     const remaining = charBudget - charCount;
     if (remaining <= 0) break;
     const clipped = content.length > remaining ? `${content.slice(0, remaining)}\n[TRUNCATED BY AUDIT BUDGET]` : content;
-    output.push({ path: file.path, language: file.language, lines: file.lineCount, content: clipped });
+    output.push({
+      path: file.path,
+      language: file.language,
+      lines: file.lineCount,
+      startLine: target.startLine,
+      endLine: target.endLine,
+      chunkIndex: target.chunkIndex,
+      chunkCount: target.chunkCount,
+      localImports: importGraph.get(file.path) ?? [],
+      frameworkHints: frameworkHints(file),
+      securityInventory: offsetInventory(buildSecurityInventory({ ...file, content: lineSlice(file.content, target.startLine, target.endLine), lineCount: target.endLine - target.startLine + 1 }), target.startLine - 1),
+      previousNotes: memory.notes.filter((item) => item.path === file.path).map((item) => item.note).slice(-5),
+      content: clipped
+    });
     charCount += clipped.length;
   }
   return { files: output, charCount };
 }
 
-function safeFileContent(file: IndexedFile): string {
+function safeFileContent(file: IndexedFile, startLine = 1, endLine = file.lineCount): string {
   if (/(^|\/)\.env($|\.|\/)/.test(file.path)) return "[REDACTED ENV FILE CONTENT]";
   if (/(package-lock\.json|yarn\.lock|pnpm-lock\.yaml|Gemfile\.lock|poetry\.lock|go\.sum|Cargo\.lock)$/i.test(file.path)) return "[DEPENDENCY LOCKFILE CONTENT OMITTED]";
-  return redactSecrets(withLineNumbers(file.content));
+  return redactSecrets(withLineNumbers(lineSlice(file.content, startLine, endLine), startLine));
 }
 
-function withLineNumbers(content: string): string {
-  return content.split(/\r?\n/).map((line, index) => `${index + 1}: ${line}`).join("\n");
+function withLineNumbers(content: string, startLine = 1): string {
+  return content.split(/\r?\n/).map((line, index) => `${startLine + index}: ${line}`).join("\n");
 }
 
-function normalizeRequestedPaths(paths: string[], allowed: Map<string, IndexedFile>, inspected: Set<string>): string[] {
-  const normalized = paths.map((filePath) => filePath.replaceAll("\\", "/").replace(/^\/+/, ""));
-  return [...new Set(normalized)].filter((filePath) => allowed.has(filePath) && !inspected.has(filePath));
+function normalizeRequestedTargets(targets: AuditTarget[], allowed: Map<string, IndexedFile>, memory: AuditMemory, maxFiles: number): AuditTarget[] {
+  const next: AuditTarget[] = [];
+  const nextFiles = new Set<string>();
+  for (const target of targets) {
+    if (!allowed.has(target.path) || hasInspectedRange(memory, target.path, target.startLine, target.endLine)) continue;
+    if (!memory.inspectedFiles.has(target.path) && !nextFiles.has(target.path) && memory.inspectedFiles.size + nextFiles.size >= maxFiles) continue;
+    next.push(target);
+    nextFiles.add(target.path);
+  }
+  return next;
 }
 
 function heuristicEntryFiles(files: IndexedFile[], scannerResults: ScannerResult[]): string[] {
-  return nextUnseenHeuristicFiles(files, scannerResults, new Set());
-}
-
-function nextUnseenHeuristicFiles(files: IndexedFile[], scannerResults: ScannerResult[], inspected: Set<string>): string[] {
   const scannerPaths = new Set(scannerResults.map((result) => result.path).filter(Boolean) as string[]);
   return files
-    .filter((file) => !inspected.has(file.path))
+    .slice()
     .sort((a, b) => scoreFile(b, scannerPaths) - scoreFile(a, scannerPaths))
-    .slice(0, 8)
     .map((file) => file.path);
+}
+
+function buildAuditChunks(files: IndexedFile[], windowLines = 180): Map<string, AuditTarget[]> {
+  const chunks = new Map<string, AuditTarget[]>();
+  for (const file of files) {
+    const targets: AuditTarget[] = [];
+    for (let startLine = 1; startLine <= file.lineCount; startLine += windowLines) {
+      const endLine = Math.min(file.lineCount, startLine + windowLines - 1);
+      targets.push({ path: file.path, startLine, endLine, chunkIndex: targets.length + 1, chunkCount: 0 });
+      if (endLine === file.lineCount) break;
+    }
+    chunks.set(file.path, targets.map((target) => ({ ...target, chunkCount: targets.length })));
+  }
+  return chunks;
+}
+
+function createAuditTraversal(files: IndexedFile[], scannerResults: ScannerResult[], importGraph: Map<string, string[]>, chunks: Map<string, AuditTarget[]>) {
+  const fallback = heuristicEntryFiles(files, scannerResults);
+  const byPath = new Map(files.map((file) => [file.path, file]));
+  const allowed = new Set(files.map((file) => file.path));
+  const queued = new Set<string>();
+  const queue: AuditTarget[] = [];
+  const keyOf = (target: AuditTarget) => `${target.path}:${target.startLine}:${target.endLine}`;
+  const pushTargets = (targets: AuditTarget[]) => {
+    for (const target of targets) {
+      if (!allowed.has(target.path)) continue;
+      const key = keyOf(target);
+      if (queued.has(key)) continue;
+      queued.add(key);
+      queue.push(target);
+    }
+  };
+  const pushFirstChunks = (paths: string[]) => {
+    for (const filePath of paths) {
+      if (!allowed.has(filePath)) continue;
+      const first = chunks.get(filePath)?.[0];
+      if (first) pushTargets([first]);
+    }
+  };
+  pushFirstChunks(fallback.filter((filePath) => isEntryPointFile(byPath.get(filePath)!)));
+  if (!queue.length) pushFirstChunks(fallback.slice(0, 6));
+
+  return {
+    enqueueImports(paths: string[]) {
+      pushFirstChunks(paths.flatMap((filePath) => importGraph.get(filePath) ?? []));
+    },
+    enqueueRequested(paths: string[]) {
+      pushFirstChunks(paths.map((filePath) => filePath.replaceAll("\\", "/").replace(/^\/+/, "")));
+    },
+    enqueueTargets(targets: AuditTarget[]) {
+      pushTargets(targets);
+    },
+    next(memory: AuditMemory, limit: number, maxFiles: number): AuditTarget[] {
+      while (queue.length && hasInspectedRange(memory, queue[0].path, queue[0].startLine, queue[0].endLine)) queue.shift();
+      if (!queue.length) pushFirstChunks(fallback.filter((filePath) => !memory.inspectedFiles.has(filePath)));
+      const nextTargets: AuditTarget[] = [];
+      const newFiles = new Set<string>();
+      while (queue.length && nextTargets.length < limit) {
+        const target = queue.shift()!;
+        if (hasInspectedRange(memory, target.path, target.startLine, target.endLine)) continue;
+        if (!memory.inspectedFiles.has(target.path) && !newFiles.has(target.path) && memory.inspectedFiles.size + newFiles.size >= maxFiles) continue;
+        nextTargets.push(target);
+        newFiles.add(target.path);
+        const fileChunks = chunks.get(target.path) ?? [];
+        const nextChunk = fileChunks[target.chunkIndex];
+        if (nextChunk) pushTargets([nextChunk]);
+      }
+      return nextTargets;
+    }
+  };
+}
+
+function isEntryPointFile(file: IndexedFile): boolean {
+  if (detectRoutes(file.path, file.content).length) return true;
+  return /(server|entry|main|index|route|routes|controller|api|webhook|bin\/|cli|command|worker|job)/i.test(file.path);
+}
+
+function buildImportGraph(files: IndexedFile[], allFiles = files): Map<string, string[]> {
+  const byPath = new Map(files.map((file) => [file.path, file]));
+  const aliases = buildPathAliases(allFiles);
+  const graph = new Map<string, string[]>();
+  for (const file of files) {
+    const localImports = extractImports(file.content)
+      .flatMap((specifier) => resolveLocalImport(file.path, specifier, byPath, aliases))
+      .filter((filePath) => filePath !== file.path);
+    graph.set(file.path, [...new Set(localImports)]);
+  }
+  return graph;
+}
+
+function buildPathAliases(files: IndexedFile[]): Array<{ prefix: string; targets: string[] }> {
+  const configs = files.filter((file) => /(^|\/)(tsconfig|jsconfig)\.json$/.test(file.path));
+  const aliases: Array<{ prefix: string; targets: string[] }> = [];
+  for (const file of configs) {
+    const parsed = safeJsonParse(stripJsonComments(file.content));
+    if (!parsed || typeof parsed !== "object") continue;
+    const paths = (parsed as any).compilerOptions?.paths;
+    if (!paths || typeof paths !== "object") continue;
+    for (const [key, values] of Object.entries(paths)) {
+      if (!Array.isArray(values)) continue;
+      aliases.push({
+        prefix: key.replace(/\*.*$/, ""),
+        targets: values.map((value) => String(value).replace(/\*.*$/, "").replace(/^\.?\//, ""))
+      });
+    }
+  }
+  if (!aliases.some((alias) => alias.prefix === "@/")) aliases.push({ prefix: "@/", targets: ["src/"] });
+  return aliases;
+}
+
+function stripJsonComments(input: string): string {
+  return input.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+}
+
+function resolveLocalImport(fromPath: string, specifier: string, byPath: Map<string, IndexedFile>, aliases: Array<{ prefix: string; targets: string[] }>): string[] {
+  const normalized = specifier.replaceAll("\\", "/").trim();
+  const candidates = new Set<string>();
+  const fromDir = path.posix.dirname(fromPath.replaceAll("\\", "/"));
+  if (normalized.startsWith(".")) {
+    addPathCandidates(candidates, path.posix.normalize(path.posix.join(fromDir, normalized)));
+  } else if (normalized.startsWith("/")) {
+    addPathCandidates(candidates, normalized.replace(/^\/+/, ""));
+  } else {
+    for (const alias of aliases) {
+      if (!normalized.startsWith(alias.prefix)) continue;
+      const remainder = normalized.slice(alias.prefix.length);
+      for (const target of alias.targets) addPathCandidates(candidates, path.posix.join(target, remainder));
+    }
+    const modulePath = normalized.replace(/\./g, "/");
+    addPathCandidates(candidates, modulePath);
+    addPathCandidates(candidates, path.posix.join(fromDir, modulePath));
+  }
+  return [...candidates].filter((candidate) => byPath.has(candidate));
+}
+
+function addPathCandidates(candidates: Set<string>, basePath: string): void {
+  const clean = basePath.replace(/^\/+/, "");
+  candidates.add(clean);
+  for (const ext of [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".py", ".rb", ".php", ".go", ".java", ".cs"]) {
+    candidates.add(`${clean}${ext}`);
+    candidates.add(path.posix.join(clean, `index${ext}`));
+    candidates.add(path.posix.join(clean, `__init__${ext}`));
+  }
+}
+
+function resolveToolCalls(calls: Array<z.infer<typeof auditToolCallSchema>>, allowed: Map<string, IndexedFile>, memory: AuditMemory): AuditTarget[] {
+  const targets: AuditTarget[] = [];
+  for (const call of calls.slice(0, 20)) {
+    if (call.type === "read_file" && call.path) {
+      const file = allowed.get(normalizePath(call.path));
+      if (file) targets.push(targetWindow(file.path, 1, file.lineCount, 1, 1));
+      continue;
+    }
+    if (call.type === "search_text" && call.query) {
+      targets.push(...searchFiles(allowed, call.query, memory, "text"));
+      continue;
+    }
+    if (call.type === "search_symbol" && call.symbol) {
+      targets.push(...searchFiles(allowed, call.symbol, memory, "symbol"));
+      continue;
+    }
+    if (call.type === "find_category" && call.category) {
+      targets.push(...findCategoryTargets(allowed, call.category, memory));
+    }
+  }
+  return dedupeTargets(targets).slice(0, 30);
+}
+
+function normalizePath(filePath: string): string {
+  return filePath.replaceAll("\\", "/").replace(/^\/+/, "");
+}
+
+function searchFiles(allowed: Map<string, IndexedFile>, query: string, memory: AuditMemory, mode: "text" | "symbol"): AuditTarget[] {
+  const needle = query.trim();
+  if (!needle || needle.length < 2) return [];
+  const targets: AuditTarget[] = [];
+  const symbolRegex = mode === "symbol" ? new RegExp(`\\b${escapeRegExp(needle)}\\b`) : undefined;
+  for (const file of allowed.values()) {
+    const lines = file.content.split(/\r?\n/);
+    for (const [index, line] of lines.entries()) {
+      const matched = symbolRegex ? symbolRegex.test(line) : line.toLowerCase().includes(needle.toLowerCase());
+      if (!matched) continue;
+      const lineNo = index + 1;
+      if (hasInspectedLine(memory, file.path, lineNo)) continue;
+      targets.push(targetWindow(file.path, Math.max(1, lineNo - 60), Math.min(file.lineCount, lineNo + 90), 1, 1));
+      if (targets.length >= 20) return targets;
+    }
+  }
+  return targets;
+}
+
+function findCategoryTargets(allowed: Map<string, IndexedFile>, category: string, memory: AuditMemory): AuditTarget[] {
+  const normalized = category.toLowerCase();
+  const targets: AuditTarget[] = [];
+  for (const file of allowed.values()) {
+    const inventory = buildSecurityInventory(file);
+    const lines = [
+      ...inventory.sinks.filter((sink) => sink.category.includes(normalized) || normalized.includes(sink.category)).map((sink) => sink.line),
+      ...(/auth|tenant|csrf|cors/.test(normalized) ? inventory.guards.map((guard) => guard.line) : []),
+      ...(/source|entry|route/.test(normalized) ? inventory.entrypoints.map((entry) => entry.line) : []),
+      ...(/trust|input|source/.test(normalized) ? inventory.trustBoundaries.map((boundary) => boundary.line) : [])
+    ];
+    for (const line of lines) {
+      if (hasInspectedLine(memory, file.path, line)) continue;
+      targets.push(targetWindow(file.path, Math.max(1, line - 60), Math.min(file.lineCount, line + 90), 1, 1));
+      if (targets.length >= 30) return targets;
+    }
+  }
+  return targets;
+}
+
+function targetWindow(pathName: string, startLine: number, endLine: number, chunkIndex: number, chunkCount: number): AuditTarget {
+  return { path: pathName, startLine, endLine, chunkIndex, chunkCount };
+}
+
+function dedupeTargets(targets: AuditTarget[]): AuditTarget[] {
+  const seen = new Set<string>();
+  return targets.filter((target) => {
+    const key = `${target.path}:${target.startLine}:${target.endLine}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function rememberRange(memory: AuditMemory, filePath: string, startLine: number, endLine: number): void {
+  const ranges = memory.inspectedRanges.get(filePath) ?? [];
+  ranges.push({ startLine, endLine });
+  memory.inspectedRanges.set(filePath, ranges);
+}
+
+function hasInspectedRange(memory: AuditMemory, filePath: string, startLine: number, endLine: number): boolean {
+  return (memory.inspectedRanges.get(filePath) ?? []).some((range) => startLine >= range.startLine && endLine <= range.endLine);
+}
+
+function hasInspectedLine(memory: AuditMemory, filePath: string, line: number): boolean {
+  return (memory.inspectedRanges.get(filePath) ?? []).some((range) => line >= range.startLine && line <= range.endLine);
+}
+
+function frameworkHints(file: IndexedFile): string[] {
+  const hints = new Set<string>();
+  for (const route of detectRoutes(file.path, file.content)) hints.add(route.frameworkGuess);
+  const text = `${file.path}\n${file.content}`;
+  if (/\bexpress\b|app\.(get|post|put|patch|delete)|router\./i.test(text)) hints.add("express");
+  if (/\/app\/api\/|\/pages\/api\/|next\/server|NextRequest/i.test(text)) hints.add("nextjs");
+  if (/FastAPI|@app\.(get|post|put|patch|delete)/.test(text)) hints.add("fastapi");
+  if (/django|urlpatterns|models\.Model|DEBUG\s*=/i.test(text)) hints.add("django");
+  if (/config\/routes\.rb|ApplicationController|before_action|params\[/i.test(text)) hints.add("rails");
+  if (/Route::|app\/Http\/Controllers|Illuminate\\/i.test(text)) hints.add("laravel");
+  return [...hints].slice(0, 8);
+}
+
+function buildSecurityInventory(file: IndexedFile): SecurityInventory {
+  const entrypoints = detectRoutes(file.path, file.content).map((route) => ({ kind: `route:${route.frameworkGuess}`, line: route.startLine, detail: `${route.method} ${route.routePath}` })).slice(0, 30);
+  const trustBoundaries: SecurityInventory["trustBoundaries"] = [];
+  const sinks: SecurityInventory["sinks"] = [];
+  const guards: SecurityInventory["guards"] = [];
+  const lines = file.content.split(/\r?\n/);
+  for (const [index, line] of lines.entries()) {
+    const lineNo = index + 1;
+    if (/(req\.(query|params|body|headers|cookies)|request\.(args|form|json|files)|params\[|\$_(GET|POST|REQUEST|COOKIE|FILES)|ARGV|process\.argv|sys\.argv)/i.test(line)) trustBoundaries.push({ line: lineNo, detail: line.trim().slice(0, 180) });
+    if (/(fetch\(|axios\.|http\.get|https\.get|request\()/i.test(line)) sinks.push({ category: "ssrf", line: lineNo, detail: line.trim().slice(0, 180) });
+    if (/(exec|execSync|spawn|spawnSync|system|shell_exec|subprocess\.(run|Popen)|Open3\.)\s*\(/i.test(line)) sinks.push({ category: "command-injection", line: lineNo, detail: line.trim().slice(0, 180) });
+    if (/(sendFile|readFile|writeFile|createReadStream|open|file_get_contents|File\.read|Path\()/i.test(line)) sinks.push({ category: "path-traversal", line: lineNo, detail: line.trim().slice(0, 180) });
+    if (/(innerHTML|dangerouslySetInnerHTML|v-html|render\s+inline)/i.test(line)) sinks.push({ category: "xss", line: lineNo, detail: line.trim().slice(0, 180) });
+    if (/(redirect|location\.href|header\s*\(\s*['"]Location)/i.test(line)) sinks.push({ category: "open-redirect", line: lineNo, detail: line.trim().slice(0, 180) });
+    if (/(requireAuth|isAuthenticated|authorize|policy|before_action|middleware|csrf|sanitize|escape|validate|schema|zod|joi|allowlist|whitelist|normalize|realpath)/i.test(line)) guards.push({ line: lineNo, detail: line.trim().slice(0, 180) });
+  }
+  return { entrypoints, trustBoundaries: trustBoundaries.slice(0, 30), sinks: sinks.slice(0, 40), guards: guards.slice(0, 40) };
+}
+
+function summarizeInventory(inventory: SecurityInventory): string {
+  return [
+    `entrypoints=${inventory.entrypoints.length}`,
+    `trustBoundaries=${inventory.trustBoundaries.length}`,
+    `sinks=${inventory.sinks.map((sink) => sink.category).slice(0, 8).join(",") || "none"}`,
+    `guards=${inventory.guards.length}`
+  ].join(" ");
+}
+
+function offsetInventory(inventory: SecurityInventory, offset: number): SecurityInventory {
+  if (!offset) return inventory;
+  return {
+    entrypoints: inventory.entrypoints.map((item) => ({ ...item, line: item.line + offset })),
+    trustBoundaries: inventory.trustBoundaries.map((item) => ({ ...item, line: item.line + offset })),
+    sinks: inventory.sinks.map((item) => ({ ...item, line: item.line + offset })),
+    guards: inventory.guards.map((item) => ({ ...item, line: item.line + offset }))
+  };
 }
 
 function scoreManifestFile(file: ManifestEntry): number {
@@ -306,6 +677,46 @@ function normalizeAuditResponse(parsed: unknown): unknown {
     if (object.result && typeof object.result === "object") return object.result;
   }
   return parsed;
+}
+
+function isSupportedAuditFinding(input: z.infer<typeof auditFindingSchema>, allowed: Map<string, IndexedFile>, memory: AuditMemory): boolean {
+  const target = allowed.get(input.path);
+  if (!target || !memory.inspectedFiles.has(input.path)) return false;
+  const lines = [input.startLine, input.endLine, input.sourceLine, input.sinkLine, ...input.evidence.map((item) => item.line), ...input.dataFlow.map((item) => item.line)].filter((line): line is number => typeof line === "number");
+  if (!lines.length) return false;
+  if (lines.some((line) => line < 1 || line > target.lineCount)) return false;
+  if (input.evidence.some((item) => !memory.inspectedFiles.has(item.path) || !allowed.has(item.path) || !hasInspectedLine(memory, item.path, item.line))) return false;
+  if (input.dataFlow.some((item) => !memory.inspectedFiles.has(item.path) || !allowed.has(item.path) || !hasInspectedLine(memory, item.path, item.line))) return false;
+  for (const line of [input.startLine, input.endLine, input.sourceLine, input.sinkLine].filter((item): item is number => typeof item === "number")) {
+    if (!hasInspectedLine(memory, input.path, line)) return false;
+  }
+  const text = JSON.stringify(input).toLowerCase();
+  if (input.category.toLowerCase() === "secrets" && /(process\.env|import\.meta\.env|os\.environ|getenv\(|env\[)/i.test(text) && !/(hardcoded|literal|committed|checked in|\.env)/i.test(text)) return false;
+  if (/(^|\/)(__tests__|test|tests|spec|fixtures|examples?)\//i.test(input.path) && !/prod|production|runtime|reachable/i.test(text)) return false;
+  return lineEvidenceMatches(input, allowed);
+}
+
+function lineEvidenceMatches(input: z.infer<typeof auditFindingSchema>, allowed: Map<string, IndexedFile>): boolean {
+  const category = input.category.toLowerCase();
+  const citedLines = [
+    ...input.evidence.map((item) => ({ path: item.path, line: item.line })),
+    ...input.dataFlow.map((item) => ({ path: item.path, line: item.line })),
+    ...(input.sourceLine ? [{ path: input.path, line: input.sourceLine }] : []),
+    ...(input.sinkLine ? [{ path: input.path, line: input.sinkLine }] : [])
+  ];
+  const snippets = citedLines.map((item) => getLine(allowed.get(item.path)?.content ?? "", item.line)).join("\n").toLowerCase();
+  if (!snippets.trim()) return false;
+  if (/secret/.test(category)) return /(api[_-]?key|token|password|secret|passwd|pwd)\b/.test(snippets) && /['"][^'"]{8,}['"]|=\s*[A-Za-z0-9_./+=-]{12,}/.test(snippets);
+  if (/ssrf/.test(category)) return /(fetch|axios|request|http\.|https\.|url)/.test(snippets);
+  if (/path|file/.test(category)) return /(readfile|writefile|sendfile|createreadstream|open|path|file_get_contents|fopen|file\.read)/.test(snippets);
+  if (/command|injection/.test(category)) return /(exec|spawn|system|shell|subprocess|open3|eval|query|sql)/.test(snippets);
+  if (/xss/.test(category)) return /(innerhtml|dangerouslysetinnerhtml|v-html|render|html|template)/.test(snippets);
+  if (/auth|tenant/.test(category)) return /(auth|admin|user|tenant|permission|role|policy|session|jwt|params|req\.|request)/.test(snippets);
+  return true;
+}
+
+function getLine(content: string, line: number): string {
+  return content.split(/\r?\n/)[line - 1] ?? "";
 }
 
 function toFinding(input: z.infer<typeof auditFindingSchema>): Finding {

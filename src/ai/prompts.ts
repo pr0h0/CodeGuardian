@@ -32,7 +32,7 @@ Required output schema, with every key present:
   "category": "secrets | sql-injection | xss | dependency | weak-crypto | auth | ...",
   "severity": "critical | high | medium | low | info",
   "confidence": "confirmed | high | medium | low",
-  "status": "confirmed | suspected | needs_dynamic_test | false_positive",
+  "status": "confirmed | confirmed_true_positive | likely_true_positive | security_hotspot | needs_context | suspected | needs_dynamic_test | false_positive",
   "affectedLocations": [{"path": "path from input", "startLine": 1, "endLine": 1}],
   "source": "scanner or source description",
   "sourceLine": 1,
@@ -84,7 +84,7 @@ Critic JSON schema:
   "verdict": "keep | downgrade | reject",
   "confidence": "high | medium | low",
   "reasons": ["specific reason"],
-  "revisedStatus": "confirmed | suspected | needs_dynamic_test | false_positive",
+  "revisedStatus": "confirmed | confirmed_true_positive | likely_true_positive | security_hotspot | needs_context | suspected | needs_dynamic_test | false_positive",
   "revisedConfidence": "confirmed | high | medium | low"
 }`;
 }

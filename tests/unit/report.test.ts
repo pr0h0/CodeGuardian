@@ -2,7 +2,9 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
+import { writeHtmlReport } from "../../src/reports/html.js";
 import { writeMarkdownReport } from "../../src/reports/markdown.js";
+import { writeRuleExport } from "../../src/reports/ruleExport.js";
 
 describe("report", () => {
   it("writes markdown", () => {
@@ -60,5 +62,111 @@ describe("report", () => {
     const content = fs.readFileSync(file, "utf8");
     expect(content).toContain("<div class=\"x\">Tom & Jerry</div>");
     expect(content).not.toContain("&amp; Jerry");
+  });
+
+  it("renders collapsible report sections and finding items", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cg-"));
+    const file = writeMarkdownReport(dir, {
+      scan: { id: "1", repo_path: ".", status: "completed" },
+      files: [],
+      findings: [{
+        title: "Command injection",
+        category: "command-injection",
+        severity: "high",
+        confidence: "high",
+        status: "confirmed",
+        path: "app.ts",
+        start_line: 1,
+        reasoning: "exec receives request input",
+        remediation: "avoid shell execution",
+        evidence_json: "[]"
+      }],
+      scannerResults: []
+    });
+    const content = fs.readFileSync(file, "utf8");
+    expect(content).toContain("<details open>");
+    expect(content).toContain("<details>");
+    expect(content).toContain("<summary><strong>Confirmed Code Findings (1 items)</strong></summary>");
+    expect(content).toContain("<summary><strong>1. high Command injection @app.ts:1</strong></summary>");
+  });
+
+  it("exports semgrep-style rules for true positives", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cg-"));
+    const file = writeRuleExport(dir, {
+      findings: [{
+        title: "Command injection",
+        category: "command-injection",
+        severity: "high",
+        confidence: "high",
+        status: "confirmed_true_positive",
+        path: "app.ts",
+        start_line: 10
+      }]
+    }, "report");
+
+    expect(file).toBeTruthy();
+    const content = fs.readFileSync(file!, "utf8");
+    expect(content).toContain("rules:");
+    expect(content).toContain("codeguardian.command-injection.command-injection");
+    expect(content).toContain("exec");
+  });
+
+  it("renders additional SAST findings as a table", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cg-"));
+    const file = writeMarkdownReport(dir, {
+      scan: { id: "1", repo_path: ".", status: "completed" },
+      files: [],
+      findings: [],
+      scannerResults: [{
+        scanner: "semgrep",
+        rule_id: "javascript.lang.security.audit.detect-eval-with-expression",
+        title: "Use of eval",
+        category: "code-injection",
+        severity: "high",
+        path: "src/app.ts",
+        start_line: 12,
+        message: "eval with dynamic input"
+      }]
+    });
+
+    const content = fs.readFileSync(file, "utf8");
+    expect(content).toContain("| Severity | Rule | Category | Count | Reason | Primary file | Examples |");
+    expect(content).toContain("| high | semgrep/javascript.lang.security.audit.detect-eval-with-expression | code-injection | 1 | Use of eval | src/app.ts:12 | src/app.ts:12 |");
+  });
+
+  it("writes searchable html report", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cg-"));
+    const file = writeHtmlReport(dir, {
+      scan: { id: "1", repo_path: ".", status: "completed" },
+      files: [{ indexed: 1 }],
+      findings: [{
+        title: "Command injection",
+        category: "command-injection",
+        severity: "high",
+        confidence: "high",
+        status: "likely_true_positive",
+        path: "src/app.ts",
+        start_line: 12,
+        reasoning: "exec receives request input",
+        remediation: "avoid shell execution"
+      }],
+      scannerResults: [{
+        scanner: "semgrep",
+        rule_id: "eval",
+        title: "Use of eval",
+        category: "code-injection",
+        severity: "medium",
+        path: "src/eval.ts",
+        start_line: 3
+      }]
+    });
+
+    const content = fs.readFileSync(file, "utf8");
+    expect(file.endsWith(".html")).toBe(true);
+    expect(content).toContain("<!doctype html>");
+    expect(content).toContain("Codeguardian Security Report");
+    expect(content).toContain("id=\"search\"");
+    expect(content).toContain("Command injection");
+    expect(content).toContain("Additional SAST Findings");
   });
 });

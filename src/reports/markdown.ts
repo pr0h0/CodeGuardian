@@ -27,68 +27,43 @@ export function writeMarkdownReport(outDir: string, bundle: any, warnings: strin
   const lines = [
     "# Codeguardian Security Report",
     "",
-    "## Summary",
-    `- Scan ID: ${bundle.scan?.id ?? "unknown"}`,
-    `- Repository: ${escapeHtml(repoPath || "unknown")}`,
-    `- Status: ${bundle.scan?.status ?? "unknown"}`,
-    `- Indexed files: ${(bundle.files ?? []).filter((file: Row) => file.indexed).length}`,
-    `- Code findings: ${confirmedCodeFindings.length}`,
-    `- Dependency findings: ${dependencyFindings.length}`,
-    `- False positives: ${falsePositives.length}`,
-    `- Suppressed findings: ${bundle.suppressions?.suppressed ?? 0}`,
-    "",
-    "## Baseline Diff",
-    ...renderBaselineDiff(bundle.baselineDiff),
-    "",
-    "## Action Plan",
-    ...renderActionPlan(confirmedCodeFindings, dependencyFindings),
-    "",
-    "## Top 5 Fix First",
-    ...renderTopFixes(confirmedCodeFindings, dependencyFindings),
-    "",
-    "## Execution",
-    ...((bundle.toolStatuses ?? []).length ? bundle.toolStatuses.map((tool: Row) => `- ${escapeHtml(tool.name)}: ${tool.available ? "available" : "missing"}${tool.version ? ` - ${escapeHtml(tool.version)}` : ""}${tool.error ? ` - ${escapeHtml(tool.error)}` : ""}`) : ["- Not recorded"]),
-    "- External scanners: Docker-only execution for Semgrep, Gitleaks, Trivy, OSV-Scanner, and Bearer.",
-    ...renderScannerRuns(bundle.scannerRuns ?? []),
-    "",
-    "## AI Budget",
-    ...renderAiBudget(bundle.aiBudget),
-    `- AI models: ${escapeHtml(bundle.scan?.model ?? "none")}`,
-    `- AI instructions: ${bundle.aiInstructions?.loaded ? `${escapeHtml(bundle.aiInstructions.path)} (${bundle.aiInstructions.chars} chars)` : "not supplied"}`,
-    "",
-    "## Scanner Results",
-    ...["semgrep", "gitleaks", "trivy", "osv-scanner", "bearer", "custom-rules", "taint-lite", "config-checks", "quality"].map((scannerName) => `- ${scannerName}: ${scanner.filter((item: Row) => item.scanner === scannerName).length} results`),
-    ...(bundle.incremental?.enabled ? [`- Incremental local scan: changed files ${bundle.incremental.changedFiles}, local scanner files ${bundle.incremental.localScannerFiles}`] : []),
-    "",
-    "## Suppressions",
-    ...(bundle.suppressions?.suppressed ? [`- Suppressed: ${bundle.suppressions.suppressed}`, ...(bundle.suppressions.reasons ?? []).slice(0, 20).map((reason: string) => `- ${escapeHtml(reason)}`)] : ["- None"]),
-    "",
-    "## Additional SAST Findings",
-    ...renderAdditionalSastFindings(scanner, confirmedCodeFindings, falsePositives, bundle.projectConfig?.maxAdditionalSastFindings ?? 100),
-    "",
-    "## Noise Bucket",
-    ...renderNoiseBucket(scanner),
-    "",
-    "## Code Finding Counts",
-    ...formatCounts(confirmedCodeFindings, "severity"),
-    "",
-    "## AI Audit Coverage",
-    ...renderAiAuditCoverage(repoPath, findings, bundle.files ?? []),
-    "",
-    "## Confirmed Code Findings",
-    ...renderCodeFindings(buckets.confirmed, repoPath),
-    "",
-    "## Suspected / Needs Validation",
-    ...renderCodeFindings([...buckets.suspected, ...buckets.needsDynamic], repoPath),
-    "",
-    "## Dependency Findings",
-    ...(dependencyFindings.length ? dependencyFindings.flatMap((item, index) => renderDependencyFinding(item, index + 1)) : ["No vulnerable dependency findings found."]),
-    "",
-    "## AI False Positives",
-    ...(falsePositives.length ? falsePositives.flatMap((item: Row, index: number) => renderFalsePositive(item, index + 1)) : ["No AI-triaged false positives recorded."]),
-    "",
-    "## Warnings and Errors",
-    ...(warnings.length ? warnings.map((warning) => `- ${firstSentence(warning, 220)}`) : ["- None"])
+    ...renderSection("Summary", [
+      `- Scan ID: ${bundle.scan?.id ?? "unknown"}`,
+      `- Repository: ${escapeHtml(repoPath || "unknown")}`,
+      `- Status: ${bundle.scan?.status ?? "unknown"}`,
+      `- Indexed files: ${(bundle.files ?? []).filter((file: Row) => file.indexed).length}`,
+      `- Code findings: ${confirmedCodeFindings.length}`,
+      `- Dependency findings: ${dependencyFindings.length}`,
+      `- False positives: ${falsePositives.length}`,
+      `- Suppressed findings: ${bundle.suppressions?.suppressed ?? 0}`
+    ], true),
+    ...renderSection("Action Plan", renderActionPlan(confirmedCodeFindings, dependencyFindings), true),
+    ...renderSection("Top 5 Fix First", renderTopFixes(confirmedCodeFindings, dependencyFindings), true),
+    ...renderSection("Confirmed Code Findings", renderCodeFindings(buckets.confirmed, repoPath), true, `${buckets.confirmed.length} items`),
+    ...renderSection("Suspected / Needs Validation", renderCodeFindings([...buckets.suspected, ...buckets.needsDynamic], repoPath), false, `${buckets.suspected.length + buckets.needsDynamic.length} items`),
+    ...renderSection("Dependency Findings", dependencyFindings.length ? dependencyFindings.flatMap((item, index) => renderDependencyFinding(item, index + 1)) : ["No vulnerable dependency findings found."], false, `${dependencyFindings.length} items`),
+    ...renderSection("AI False Positives", falsePositives.length ? falsePositives.flatMap((item: Row, index: number) => renderFalsePositive(item, index + 1)) : ["No AI-triaged false positives recorded."], false, `${falsePositives.length} items`),
+    ...renderSection("Additional SAST Findings", renderAdditionalSastFindings(scanner, confirmedCodeFindings, falsePositives, bundle.projectConfig?.maxAdditionalSastFindings ?? 100), false),
+    ...renderSection("Noise Bucket", renderNoiseBucket(scanner), false),
+    ...renderSection("Baseline Diff", renderBaselineDiff(bundle.baselineDiff), false),
+    ...renderSection("Code Finding Counts", formatCounts(confirmedCodeFindings, "severity"), false),
+    ...renderSection("AI Audit Coverage", renderAiAuditCoverage(repoPath, findings, bundle.files ?? []), false),
+    ...renderSection("Execution", [
+      ...((bundle.toolStatuses ?? []).length ? bundle.toolStatuses.map((tool: Row) => `- ${escapeHtml(tool.name)}: ${tool.available ? "available" : "missing"}${tool.version ? ` - ${escapeHtml(tool.version)}` : ""}${tool.error ? ` - ${escapeHtml(tool.error)}` : ""}`) : ["- Not recorded"]),
+      "- External scanners: Docker-only execution for Semgrep, Gitleaks, Trivy, OSV-Scanner, and Bearer.",
+      ...renderScannerRuns(bundle.scannerRuns ?? [])
+    ], false),
+    ...renderSection("AI Budget", [
+      ...renderAiBudget(bundle.aiBudget),
+      `- AI models: ${escapeHtml(bundle.scan?.model ?? "none")}`,
+      `- AI instructions: ${bundle.aiInstructions?.loaded ? `${escapeHtml(bundle.aiInstructions.path)} (${bundle.aiInstructions.chars} chars)` : "not supplied"}`
+    ], false),
+    ...renderSection("Scanner Results", [
+      ...["semgrep", "gitleaks", "trivy", "osv-scanner", "bearer", "custom-rules", "taint-lite", "taint-flow", "config-checks", "quality"].map((scannerName) => `- ${scannerName}: ${scanner.filter((item: Row) => item.scanner === scannerName).length} results`),
+      ...(bundle.incremental?.enabled ? [`- Incremental local scan: changed files ${bundle.incremental.changedFiles}, local scanner files ${bundle.incremental.localScannerFiles}`] : [])
+    ], false),
+    ...renderSection("Suppressions", bundle.suppressions?.suppressed ? [`- Suppressed: ${bundle.suppressions.suppressed}`, ...(bundle.suppressions.reasons ?? []).slice(0, 20).map((reason: string) => `- ${escapeHtml(reason)}`)] : ["- None"], false),
+    ...renderSection("Warnings and Errors", warnings.length ? warnings.map((warning) => `- ${firstSentence(warning, 220)}`) : ["- None"], false)
   ];
   const file = path.join(outDir, `${reportBase}.md`);
   fs.writeFileSync(file, lines.join("\n"));
@@ -98,6 +73,33 @@ export function writeMarkdownReport(outDir: string, bundle: any, warnings: strin
 function formatCounts(rows: Row[], key: string): string[] {
   const counts = Object.entries(countBy(rows, key)).map(([k, v]) => `- ${k}: ${v}`);
   return counts.length ? counts : ["- None"];
+}
+
+function renderSection(title: string, body: string[], open = false, badge = ""): string[] {
+  const summary = badge ? `${title} (${escapeHtml(badge)})` : title;
+  return [
+    `## ${title}`,
+    "",
+    `<details${open ? " open" : ""}>`,
+    `<summary><strong>${summary}</strong></summary>`,
+    "",
+    ...body,
+    "",
+    "</details>",
+    ""
+  ];
+}
+
+function renderItemDetails(summary: string, body: string[], open = false): string[] {
+  return [
+    `<details${open ? " open" : ""}>`,
+    `<summary><strong>${summary}</strong></summary>`,
+    "",
+    ...body,
+    "",
+    "</details>",
+    ""
+  ];
 }
 
 function renderActionPlan(findings: Row[], dependencies: DependencyFinding[]): string[] {
@@ -173,13 +175,32 @@ function renderAdditionalSastFindings(scannerResults: Row[], codeFindings: Row[]
   if (!rows.length) return ["No additional SAST findings outside promoted code findings."];
   const grouped = groupAdditionalRows(rows);
   const limited = grouped.slice(0, maxItems);
-  const lines = limited.map((group) => {
+  const lines = [
+    "| Severity | Rule | Category | Count | Reason | Primary file | Examples |",
+    "|---|---|---|---:|---|---|---|"
+  ];
+  for (const group of limited) {
     const item = group.rows[0];
-    const examples = group.rows.slice(0, 3).map((row) => `${escapeHtml(row.path ?? "unknown")}:${row.start_line ?? "?"}`).join(", ");
-    return `- **${escapeHtml(item.severity)}** ${escapeHtml(item.scanner)}/${escapeHtml(item.rule_id)} (${group.rows.length}) - ${escapeHtml(firstSentence(item.title || item.message, 180))}. Examples: ${examples}`;
-  });
+    const examples = group.rows.slice(0, 3).map((row) => `${row.path ?? "unknown"}:${row.start_line ?? "?"}`).join("<br>");
+    lines.push([
+      tableCell(item.severity),
+      tableCell(`${item.scanner}/${item.rule_id}`),
+      tableCell(item.category ?? "security"),
+      String(group.rows.length),
+      tableCell(firstSentence(item.title || item.message, 180)),
+      tableCell(`${item.path ?? "unknown"}:${item.start_line ?? "?"}`),
+      tableCell(examples)
+    ].join(" | ").replace(/^/, "| ").replace(/$/, " |"));
+  }
   if (grouped.length > limited.length) lines.push(`- Omitted ${grouped.length - limited.length} additional grouped SAST findings from report view.`);
   return lines;
+}
+
+function tableCell(value: unknown): string {
+  return escapeHtml(String(value ?? ""))
+    .replaceAll("|", "\\|")
+    .replace(/\r?\n/g, "<br>")
+    .trim() || "unknown";
 }
 
 function groupAdditionalRows(rows: Row[]): Array<{ key: string; rows: Row[] }> {
@@ -204,15 +225,15 @@ function renderNoiseBucket(scannerResults: Row[]): string[] {
 
 function scannerSortWeight(item: Row): number {
   const severityOrder: Record<string, number> = { critical: 0, high: 1, medium: 2, low: 3, info: 4 };
-  const scannerOrder: Record<string, number> = { "taint-lite": 0, "config-checks": 1, bearer: 2, semgrep: 3, gitleaks: 4, "custom-rules": 5 };
+  const scannerOrder: Record<string, number> = { "taint-flow": 0, "taint-lite": 1, "config-checks": 2, bearer: 3, semgrep: 4, gitleaks: 5, "custom-rules": 6 };
   return (severityOrder[item.severity] ?? 5) * 10 + (scannerOrder[item.scanner] ?? 9);
 }
 
 function bucketCodeFindings(findings: Row[]): { confirmed: Row[]; suspected: Row[]; needsDynamic: Row[] } {
   return {
-    confirmed: findings.filter((item) => item.status === "confirmed"),
-    suspected: findings.filter((item) => item.status === "suspected"),
-    needsDynamic: findings.filter((item) => item.status === "needs_dynamic_test")
+    confirmed: findings.filter((item) => item.status === "confirmed" || item.status === "confirmed_true_positive"),
+    suspected: findings.filter((item) => item.status === "suspected" || item.status === "likely_true_positive"),
+    needsDynamic: findings.filter((item) => item.status === "needs_dynamic_test" || item.status === "security_hotspot" || item.status === "needs_context")
   };
 }
 
@@ -233,43 +254,47 @@ function dedupeCodeFindings(findings: Row[]): Row[] {
 
 function renderCodeFindings(findings: Row[], repoPath: string): string[] {
   if (!findings.length) return ["No findings in this bucket."];
-  return findings.flatMap((item, index) => [
-    `## ${index + 1}. ${escapeHtml(item.title)} @${escapeHtml(item.path ?? "unknown")}:${item.start_line ?? "?"}`,
-    "",
-    `- Vulnerability type: ${escapeHtml(item.category)}`,
-    `- Severity: ${escapeHtml(item.severity)}`,
-    `- Confidence: ${escapeHtml(item.confidence)}`,
-    `- Status: ${escapeHtml(item.status)}`,
-    `- Baseline status: ${escapeHtml(item.baseline_status ?? "unknown")}`,
-    `- Fingerprint: ${escapeHtml(item.fingerprint ?? "unknown")}`,
-    `- Provenance: ${provenance(item)}`,
-    ...ruleMetadataLines(item),
-    `- Exploitability score: ${item.exploitability_score ?? scoreCodeExploitability(item)}/100`,
-    `- Reachability: ${reachability(item)}`,
-    `- Short description: ${firstSentence(item.reasoning, 220)}`,
-    `- Why confidence is ${item.confidence}: ${confidenceReason(item)}`,
-    "",
-    "### Description",
-    cleanParagraph(item.reasoning),
-    "",
-    "### Source-to-Sink Trace",
-    `- Source: ${cleanParagraph(item.source ?? "unknown input/source")}`,
-    `- Sink: ${cleanParagraph(item.sink ?? "reported vulnerable operation")}`,
-    `- Location: \`${escapeHtml(item.path ?? "unknown")}:${item.start_line ?? "?"}\``,
-    "",
-    "### Evidence Snippet",
-    ...renderSnippet(repoPath, item),
-    "",
-    "### Steps to Reproduce",
-    ...reproductionSteps(item),
-    "",
-    "### How to Fix",
-    cleanParagraph(item.remediation),
-    "",
-    "### Suggested Patch Direction",
-    patchDirection(item),
-    ""
-  ]);
+  return findings.flatMap((item, index) => renderItemDetails(
+    `${index + 1}. ${escapeHtml(item.severity)} ${escapeHtml(item.title)} @${escapeHtml(item.path ?? "unknown")}:${item.start_line ?? "?"}`,
+    [
+      `- Vulnerability type: ${escapeHtml(item.category)}`,
+      `- Severity: ${escapeHtml(item.severity)}`,
+      `- Confidence: ${escapeHtml(item.confidence)}`,
+      `- Status: ${escapeHtml(item.status)}`,
+      `- Baseline status: ${escapeHtml(item.baseline_status ?? "unknown")}`,
+      `- Fingerprint: ${escapeHtml(item.fingerprint ?? "unknown")}`,
+      `- Provenance: ${provenance(item)}`,
+      ...ruleMetadataLines(item),
+      `- Exploitability score: ${item.exploitability_score ?? scoreCodeExploitability(item)}/100`,
+      `- Reachability: ${reachability(item)}`,
+      `- Short description: ${firstSentence(item.reasoning, 220)}`,
+      `- Why confidence is ${item.confidence}: ${confidenceReason(item)}`,
+      "",
+      "### Description",
+      cleanParagraph(item.reasoning),
+      "",
+      "### Source-to-Sink Trace",
+      `- Source: ${cleanParagraph(item.source ?? "unknown input/source")}`,
+      `- Sink: ${cleanParagraph(item.sink ?? "reported vulnerable operation")}`,
+      `- Location: \`${escapeHtml(item.path ?? "unknown")}:${item.start_line ?? "?"}\``,
+      "",
+      "### Evidence Snippet",
+      ...renderSnippet(repoPath, item),
+      "",
+      "### Steps to Reproduce",
+      ...reproductionSteps(item),
+      "",
+      "### Dynamic Validation Plan",
+      ...dynamicValidationPlan(item),
+      "",
+      "### How to Fix",
+      cleanParagraph(item.remediation),
+      "",
+      "### Suggested Patch Direction",
+      patchDirection(item)
+    ],
+    index === 0 && ["critical", "high"].includes(String(item.severity))
+  ));
 }
 
 function ruleMetadataLines(item: Row): string[] {
@@ -283,14 +308,11 @@ function ruleMetadataLines(item: Row): string[] {
 }
 
 function renderFalsePositive(item: Row, index: number): string[] {
-  return [
-    `### ${index}. ${escapeHtml(item.title)} @${escapeHtml(item.path ?? "unknown")}:${item.start_line ?? "?"}`,
-    "",
+  return renderItemDetails(`${index}. ${escapeHtml(item.title)} @${escapeHtml(item.path ?? "unknown")}:${item.start_line ?? "?"}`, [
     `- Original severity: ${escapeHtml(item.severity)}`,
     `- Reason: ${cleanParagraph(item.reasoning)}`,
-    `- Recommendation: ${cleanParagraph(item.remediation)}`,
-    ""
-  ];
+    `- Recommendation: ${cleanParagraph(item.remediation)}`
+  ]);
 }
 
 interface DependencyFinding {
@@ -302,6 +324,7 @@ interface DependencyFinding {
   packagePath: string;
   used: boolean;
   usageEvidence: string[];
+  reachability: string;
   probability: number;
   fix: string;
   sources: Row[];
@@ -332,6 +355,7 @@ function buildDependencyFindings(repoPath: string, results: Row[]): DependencyFi
       packagePath: dependencyPackagePath(repoPath, packageName, direct),
       used,
       usageEvidence,
+      reachability: dependencyReachability(direct, used),
       probability: scoreDependencyExploitability(severity, direct, used),
       fix: dependencyFix(raw, packageName),
       sources: items
@@ -353,13 +377,12 @@ function dependencyPackageName(raw: Row, result: Row): string {
 }
 
 function renderDependencyFinding(item: DependencyFinding, index: number): string[] {
-  return [
-    `### ${index}. ${escapeHtml(item.packageName)} (${escapeHtml(item.cves.join(", "))})`,
-    "",
+  return renderItemDetails(`${index}. ${escapeHtml(item.severity)} ${escapeHtml(item.packageName)} (${escapeHtml(item.cves.join(", "))})`, [
     `- Severity: ${escapeHtml(item.severity)}`,
     `- Direct dependency: ${item.direct ? "yes" : "no, appears transitive"}`,
     `- Package path: ${escapeHtml(item.packagePath)}`,
     `- Used by codebase: ${item.used ? "yes" : "no usage found in indexed source"}`,
+    `- Reachability: ${escapeHtml(item.reachability)}`,
     `- Exploitation probability: ${item.probability}/100`,
     `- Vulnerabilities: ${escapeHtml(item.titles.slice(0, 4).join("; "))}`,
     "",
@@ -367,9 +390,15 @@ function renderDependencyFinding(item: DependencyFinding, index: number): string
     ...(item.usageEvidence.length ? item.usageEvidence.map((evidence) => `- ${escapeHtml(evidence)}`) : ["- No direct import/require/reference found in application source files."]),
     "",
     "#### Fix",
-    `- ${item.fix}`,
-    ""
-  ];
+    `- ${item.fix}`
+  ], index === 1 && item.probability >= 70);
+}
+
+function dependencyReachability(direct: boolean, used: boolean): string {
+  if (direct && used) return "reachable candidate: direct dependency is imported/referenced by application source";
+  if (direct) return "installed directly, but no application source import/reference was found";
+  if (used) return "transitive dependency appears referenced by application source; validate package path";
+  return "transitive/unreferenced in indexed source; prioritize lower unless runtime evidence exists";
 }
 
 function parseRaw(rawJson: unknown): Row {
@@ -493,7 +522,9 @@ function scoreCodeExploitability(item: Row): number {
   if (/authenticated|admin|owner/.test(text)) score -= 10;
   if (/csrf|xss|injection|secret|private key|crypto|ssrf/.test(text)) score += 8;
   if (item.status === "suspected") score -= 10;
-  if (item.status === "needs_dynamic_test") score -= 5;
+  if (item.status === "needs_dynamic_test" || item.status === "security_hotspot" || item.status === "needs_context") score -= 5;
+  if (item.status === "confirmed_true_positive") score += 8;
+  if (item.status === "likely_true_positive") score += 3;
   return Math.max(0, Math.min(100, Math.round(score)));
 }
 
@@ -574,6 +605,17 @@ function reproductionSteps(item: Row): string[] {
     `2. Trace \`${item.source ?? item.category}\` to \`${item.sink ?? "the reported sink"}\`.`,
     "3. Validate exploitability in a safe local environment."
   ];
+}
+
+function dynamicValidationPlan(item: Row): string[] {
+  const text = `${item.title} ${item.category} ${item.reasoning}`.toLowerCase();
+  if (item.status === "confirmed_true_positive") return ["- Already evidence-backed by static/AI verification. Add a regression test around the cited source-to-sink path."];
+  if (text.includes("command")) return ["- In a local fixture only, replace shell sink with a spy/stub and assert attacker-controlled argument reaches it.", "- Do not execute attacker-controlled commands during validation."];
+  if (text.includes("ssrf")) return ["- In a local fixture only, point outbound calls at a loopback canary server and assert whether untrusted URL/host is requested.", "- Block real external/internal network targets during validation."];
+  if (text.includes("path") || text.includes("file")) return ["- In a temp directory fixture, try `../` traversal against the cited route/helper and assert reads stay inside the allowed base path."];
+  if (text.includes("xss")) return ["- Render the cited path in a local browser/test renderer and assert payload is escaped, not executed."];
+  if (text.includes("csrf")) return ["- Submit the cited state-changing request without token from a different origin in a local app instance and assert rejection."];
+  return ["- Build a local regression test that exercises the cited source, sink, and missing control without touching external systems."];
 }
 
 function patchDirection(item: Row): string {
