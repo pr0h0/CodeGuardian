@@ -13,6 +13,7 @@ export function planAiTriageCandidates(scannerResults: ScannerResult[], maxCandi
 export function isAiTriageCandidate(result: ScannerResult): boolean {
   return TRIAGED_SEVERITIES.has(result.severity)
     && result.scanner !== "quality"
+    && result.scanner !== "compliance"
     && !isDependencyVulnerabilityScannerResult(result);
 }
 

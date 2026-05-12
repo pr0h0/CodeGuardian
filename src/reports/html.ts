@@ -13,6 +13,7 @@ export function writeHtmlReport(outDir: string, bundle: any, warnings: string[] 
   const activeFindings = codeFindings.filter((item: Row) => item.status !== "false_positive");
   const falsePositives = codeFindings.filter((item: Row) => item.status === "false_positive");
   const dependencies = scanner.filter(isDependencyVulnerabilityResult);
+  const compliance = scanner.filter((item: Row) => item.scanner === "compliance");
   const additionalSast = additionalSastRows(scanner, activeFindings, falsePositives);
   const html = renderDocument({
     repoPath,
@@ -20,6 +21,7 @@ export function writeHtmlReport(outDir: string, bundle: any, warnings: string[] 
     activeFindings,
     falsePositives,
     dependencies,
+    compliance,
     additionalSast,
     scanner,
     files: bundle.files ?? [],
@@ -36,6 +38,7 @@ function renderDocument(input: {
   activeFindings: Row[];
   falsePositives: Row[];
   dependencies: Row[];
+  compliance: Row[];
   additionalSast: Row[];
   scanner: Row[];
   files: Row[];
@@ -88,7 +91,7 @@ function renderDocument(input: {
     <div class="toolbar">
       <input id="search" type="search" placeholder="Search title, path, rule, reason">
       <select id="severity"><option value="">All severities</option><option>critical</option><option>high</option><option>medium</option><option>low</option><option>info</option></select>
-      <select id="status"><option value="">All statuses</option><option>confirmed_true_positive</option><option>likely_true_positive</option><option>security_hotspot</option><option>needs_context</option><option>suspected</option><option>false_positive</option></select>
+      <select id="status"><option value="">All statuses</option><option>confirmed_true_positive</option><option>likely_true_positive</option><option>security_hotspot</option><option>needs_context</option><option>suspected</option><option>false_positive</option><option>pass</option><option>fail</option><option>unknown</option></select>
     </div>
   </header>
   <main>
@@ -97,6 +100,7 @@ function renderDocument(input: {
       ${metric("Critical/High", (severityCounts.critical ?? 0) + (severityCounts.high ?? 0))}
       ${metric("Additional SAST", input.additionalSast.length)}
       ${metric("Dependencies", input.dependencies.length)}
+      ${metric("Compliance", input.compliance.length)}
       ${metric("False Positives", input.falsePositives.length)}
       ${metric("Indexed Files", input.files.filter((file) => file.indexed).length)}
     </div>
@@ -104,6 +108,7 @@ function renderDocument(input: {
     ${section("Code Findings", renderFindings(input.repoPath, input.activeFindings), true)}
     ${section("Additional SAST Findings", renderAdditionalSastTable(input.additionalSast), false)}
     ${section("Dependency Findings", renderDependencyTable(input.dependencies), false)}
+    ${section("Compliance Evidence", renderComplianceTable(input.compliance), false)}
     ${section("AI False Positives", renderFindings(input.repoPath, input.falsePositives), false)}
     ${section("Scanner Counts", renderScannerCounts(input.scanner), false)}
     ${section("Warnings", input.warnings.length ? `<ul>${input.warnings.map((w) => `<li>${esc(w)}</li>`).join("")}</ul>` : "<p>None</p>", false)}
@@ -194,6 +199,23 @@ function renderDependencyTable(rows: Row[]): string {
   ])).join("")}</tbody></table>`;
 }
 
+function renderComplianceTable(rows: Row[]): string {
+  if (!rows.length) return "<p>No compliance evidence rows recorded.</p>";
+  return `<table><thead><tr><th>Status</th><th>Control</th><th>Frameworks</th><th>Evidence</th><th>Remediation</th></tr></thead><tbody>${rows.map((item) => {
+    const raw = parseRaw(item.raw_json);
+    const evidence = Array.isArray(raw.evidence) && raw.evidence.length
+      ? raw.evidence.slice(0, 3).map((entry: Row) => `${entry.path ?? "repo"}:${entry.line ?? "?"} ${entry.note ?? ""}`).join("\n")
+      : "No evidence found in indexed files.";
+    return row({ ...item, status: raw.status ?? "unknown" }, [
+      raw.status ?? "unknown",
+      `${item.rule_id}: ${String(item.title ?? "").replace(/^(PASS|FAIL|UNKNOWN):\s*/i, "")}`,
+      [...(raw.controlIds ?? []), ...(raw.frameworks ?? [])].join(", "),
+      evidence,
+      raw.remediation ?? item.message
+    ]);
+  }).join("")}</tbody></table>`;
+}
+
 function renderScannerCounts(rows: Row[]): string {
   const counts = countBy(rows, "scanner");
   return `<table><thead><tr><th>Scanner</th><th>Count</th></tr></thead><tbody>${Object.entries(counts).map(([name, count]) => `<tr><td>${esc(name)}</td><td>${count}</td></tr>`).join("")}</tbody></table>`;
@@ -207,6 +229,7 @@ function additionalSastRows(scannerResults: Row[], codeFindings: Row[], falsePos
   const represented = new Set([...codeFindings, ...falsePositives].map((finding) => `${finding.path ?? ""}:${finding.start_line ?? ""}`));
   return scannerResults
     .filter((item) => !isDependencyVulnerabilityResult(item))
+    .filter((item) => item.scanner !== "compliance")
     .filter((item) => item.scanner !== "quality")
     .filter((item) => !represented.has(`${item.path ?? ""}:${item.start_line ?? ""}`))
     .sort((a, b) => scoreSeverity(a.severity) - scoreSeverity(b.severity))

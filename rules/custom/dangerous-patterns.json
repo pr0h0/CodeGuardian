@@ -1,6 +1,9 @@
 [
   {"id":"js-eval","title":"Dynamic eval usage","severity":"high","category":"injection","regex":"\\beval\\s*\\(","extensions":[".js",".jsx",".ts",".tsx"]},
   {"id":"js-function-constructor","title":"Function constructor usage","severity":"high","category":"injection","regex":"\\bnew\\s+Function\\s*\\(","extensions":[".js",".jsx",".ts",".tsx"]},
+  {"id":"js-prototype-pollution-assignment","title":"Prototype pollution assignment candidate","severity":"high","category":"prototype-pollution","regex":"(\\b(?:__proto__|constructor\\.prototype)\\b\\s*=|\\[[^\\]\\n]*(?:__proto__|constructor|prototype)[^\\]\\n]*\\]\\s*=)","extensions":[".js",".jsx",".ts",".tsx"]},
+  {"id":"js-prototype-pollution-unsafe-merge","title":"User-controlled object merge candidate","severity":"high","category":"prototype-pollution","regex":"\\b(Object\\.assign|(?:lodash\\.)?merge|deepmerge|defaultsDeep|set)\\s*\\([^\\n]*(req\\.|request\\.|params|query|body)","extensions":[".js",".jsx",".ts",".tsx"]},
+  {"id":"js-dynamic-object-key-assignment","title":"Dynamic object key assignment from user input","severity":"medium","category":"prototype-pollution","regex":"\\[[^\\]\\n]*(req\\.|request\\.|params|query|body)[^\\]\\n]*\\]\\s*=","extensions":[".js",".jsx",".ts",".tsx"]},
   {"id":"node-child-process","title":"Child process execution sink","severity":"high","category":"command-injection","regex":"\\b(exec|execSync|spawn|spawnSync)\\s*\\(","extensions":[".js",".jsx",".ts",".tsx"]},
   {"id":"python-shell-true","title":"Python subprocess shell=True","severity":"high","category":"command-injection","regex":"shell\\s*=\\s*True","extensions":[".py"]},
   {"id":"sql-concat","title":"SQL query string concatenation candidate","severity":"high","category":"sql-injection","regex":"(SELECT|INSERT|UPDATE|DELETE).*(\\+|\\$\\{|%s|format\\()","extensions":[".js",".ts",".py",".php",".rb",".go",".java",".cs"]},

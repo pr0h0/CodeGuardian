@@ -13,6 +13,7 @@ import { runBearer } from "../scanners/bearer.js";
 import { runTaintLite } from "../scanners/taintLite.js";
 import { runTaintFlow } from "../scanners/taintFlow.js";
 import { runConfigChecks } from "../scanners/configChecks.js";
+import { runComplianceChecks } from "../scanners/compliance.js";
 import { applySuppressions } from "../scanners/suppressions.js";
 import { deterministicFinding, aiTriage } from "../ai/triage.js";
 import { runExploratoryAudit } from "../ai/audit.js";
@@ -108,7 +109,7 @@ export async function runScan(ctx: RunContext): Promise<{ scanId: string; report
       runLoggedScanner(ctx, db, scanId, "bearer", () => runBearer(ctx.repoPath, scannerTimeout(ctx, "bearer")))
     ];
     const scanners = await Promise.all(scannerJobs);
-    const rawScannerResults = [
+    const preliminaryScannerResults = [
       ...customResults,
       ...taintResults,
       ...taintFlowResults,
@@ -119,6 +120,10 @@ export async function runScan(ctx: RunContext): Promise<{ scanId: string; report
         return scan.results;
       })
     ];
+    ctx.logger.info("scanners: running compliance checks");
+    const complianceResults = runComplianceChecks(files, preliminaryScannerResults);
+    ctx.logger.info(`scanners: compliance checks produced ${complianceResults.length} results`);
+    const rawScannerResults = [...preliminaryScannerResults, ...complianceResults];
     const configuredResults = applyProjectPolicy(rawScannerResults, ctx);
     const suppressed = applySuppressions(ctx.repoPath, files, configuredResults);
     if (suppressed.summary.suppressed) ctx.logger.info(`suppressions: removed ${suppressed.summary.suppressed} results`);
@@ -143,7 +148,7 @@ export async function runScan(ctx: RunContext): Promise<{ scanId: string; report
         log: (message) => ctx.logger.info(message),
         aiBudget
       })
-      : scannerResults.map(deterministicFinding);
+      : scannerResults.filter((result) => result.scanner !== "compliance").map(deterministicFinding);
     aiBudget.estimatedTriageTokens = Math.ceil(aiBudget.triageContextChars / 4);
     if (aiBudget.triagedScannerResults) ctx.logger.info(`ai-budget: triaged=${aiBudget.triagedScannerResults} context chars=${aiBudget.triageContextChars} estimatedTokens=${aiBudget.estimatedTriageTokens}`);
     if (aiProvider && ctx.options.aiAudit) {

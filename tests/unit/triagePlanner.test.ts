@@ -39,7 +39,8 @@ describe("triage planner", () => {
       result({ severity: "low", startLine: 1 }),
       result({ scanner: "quality", severity: "medium", startLine: 2 }),
       result({ scanner: "trivy", ruleId: "CVE-2024-1234", severity: "high", startLine: 3 }),
-      result({ scanner: "semgrep", ruleId: "real", severity: "medium", startLine: 4 })
+      result({ scanner: "compliance", ruleId: "compliance-auth-access-control", severity: "medium", startLine: 4 }),
+      result({ scanner: "semgrep", ruleId: "real", severity: "medium", startLine: 5 })
     ], 10);
 
     expect(planned).toHaveLength(1);

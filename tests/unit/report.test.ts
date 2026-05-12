@@ -134,6 +134,37 @@ describe("report", () => {
     expect(content).toContain("| high | semgrep/javascript.lang.security.audit.detect-eval-with-expression | code-injection | 1 | Use of eval | src/app.ts:12 | src/app.ts:12 |");
   });
 
+  it("renders compliance evidence outside additional SAST findings", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cg-"));
+    const file = writeMarkdownReport(dir, {
+      scan: { id: "1", repo_path: ".", status: "completed" },
+      files: [],
+      findings: [],
+      scannerResults: [{
+        scanner: "compliance",
+        rule_id: "compliance-auth-access-control",
+        title: "PASS: Access control evidence",
+        category: "compliance",
+        severity: "info",
+        path: "src/auth.ts",
+        start_line: 1,
+        message: "auth evidence",
+        raw_json: JSON.stringify({
+          status: "pass",
+          frameworks: ["SOC 2", "ISO 27001"],
+          controlIds: ["SOC2 CC6.1", "ISO27001 A.5.15"],
+          evidence: [{ path: "src/auth.ts", line: 1, note: "requireAuth" }],
+          remediation: "document controls"
+        })
+      }]
+    });
+
+    const content = fs.readFileSync(file, "utf8");
+    expect(content).toContain("Compliance Evidence");
+    expect(content).toContain("| pass | compliance-auth-access-control: Access control evidence | SOC2 CC6.1, ISO27001 A.5.15, SOC 2, ISO 27001 |");
+    expect(content).toContain("No additional SAST findings outside promoted code findings.");
+  });
+
   it("writes searchable html report", () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cg-"));
     const file = writeHtmlReport(dir, {

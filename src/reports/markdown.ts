@@ -17,6 +17,7 @@ export function writeMarkdownReport(outDir: string, bundle: any, warnings: strin
   const repoPath = String(bundle.scan?.repo_path ?? "");
   const findings = bundle.findings ?? [];
   const scanner = bundle.scannerResults ?? [];
+  const compliance = scanner.filter((item: Row) => item.scanner === "compliance");
   const codeFindings = findings.filter((item: Row) => item.category !== "dependency");
   const dependencyResults = scanner.filter(isDependencyVulnerabilityResult);
   const dependencyFindings = buildDependencyFindings(repoPath, dependencyResults);
@@ -34,6 +35,7 @@ export function writeMarkdownReport(outDir: string, bundle: any, warnings: strin
       `- Indexed files: ${(bundle.files ?? []).filter((file: Row) => file.indexed).length}`,
       `- Code findings: ${confirmedCodeFindings.length}`,
       `- Dependency findings: ${dependencyFindings.length}`,
+      `- Compliance evidence rows: ${compliance.length}`,
       `- False positives: ${falsePositives.length}`,
       `- Suppressed findings: ${bundle.suppressions?.suppressed ?? 0}`
     ], true),
@@ -42,6 +44,7 @@ export function writeMarkdownReport(outDir: string, bundle: any, warnings: strin
     ...renderSection("Confirmed Code Findings", renderCodeFindings(buckets.confirmed, repoPath), true, `${buckets.confirmed.length} items`),
     ...renderSection("Suspected / Needs Validation", renderCodeFindings([...buckets.suspected, ...buckets.needsDynamic], repoPath), false, `${buckets.suspected.length + buckets.needsDynamic.length} items`),
     ...renderSection("Dependency Findings", dependencyFindings.length ? dependencyFindings.flatMap((item, index) => renderDependencyFinding(item, index + 1)) : ["No vulnerable dependency findings found."], false, `${dependencyFindings.length} items`),
+    ...renderSection("Compliance Evidence", renderComplianceEvidence(compliance), false, `${compliance.length} controls`),
     ...renderSection("AI False Positives", falsePositives.length ? falsePositives.flatMap((item: Row, index: number) => renderFalsePositive(item, index + 1)) : ["No AI-triaged false positives recorded."], false, `${falsePositives.length} items`),
     ...renderSection("Additional SAST Findings", renderAdditionalSastFindings(scanner, confirmedCodeFindings, falsePositives, bundle.projectConfig?.maxAdditionalSastFindings ?? 100), false),
     ...renderSection("Noise Bucket", renderNoiseBucket(scanner), false),
@@ -59,7 +62,7 @@ export function writeMarkdownReport(outDir: string, bundle: any, warnings: strin
       `- AI instructions: ${bundle.aiInstructions?.loaded ? `${escapeHtml(bundle.aiInstructions.path)} (${bundle.aiInstructions.chars} chars)` : "not supplied"}`
     ], false),
     ...renderSection("Scanner Results", [
-      ...["semgrep", "gitleaks", "trivy", "osv-scanner", "bearer", "custom-rules", "taint-lite", "taint-flow", "config-checks", "quality"].map((scannerName) => `- ${scannerName}: ${scanner.filter((item: Row) => item.scanner === scannerName).length} results`),
+      ...["semgrep", "gitleaks", "trivy", "osv-scanner", "bearer", "custom-rules", "taint-lite", "taint-flow", "config-checks", "compliance", "quality"].map((scannerName) => `- ${scannerName}: ${scanner.filter((item: Row) => item.scanner === scannerName).length} results`),
       ...(bundle.incremental?.enabled ? [`- Incremental local scan: changed files ${bundle.incremental.changedFiles}, local scanner files ${bundle.incremental.localScannerFiles}`] : [])
     ], false),
     ...renderSection("Suppressions", bundle.suppressions?.suppressed ? [`- Suppressed: ${bundle.suppressions.suppressed}`, ...(bundle.suppressions.reasons ?? []).slice(0, 20).map((reason: string) => `- ${escapeHtml(reason)}`)] : ["- None"], false),
@@ -171,6 +174,7 @@ function renderAdditionalSastFindings(scannerResults: Row[], codeFindings: Row[]
   const represented = new Set([...codeFindings, ...falsePositives].map((finding) => `${finding.path ?? ""}:${finding.start_line ?? ""}`));
   const rows = scannerResults
     .filter((item) => !isDependencyVulnerabilityResult(item))
+    .filter((item) => item.scanner !== "compliance")
     .filter((item) => item.scanner !== "quality")
     .filter((item) => !represented.has(`${item.path ?? ""}:${item.start_line ?? ""}`))
     .sort((a, b) => scannerSortWeight(a) - scannerSortWeight(b));
@@ -198,6 +202,33 @@ function renderAdditionalSastFindings(scannerResults: Row[], codeFindings: Row[]
   return lines;
 }
 
+function renderComplianceEvidence(rows: Row[]): string[] {
+  if (!rows.length) return ["No compliance evidence rows recorded."];
+  const counts = countBy(rows.map((row) => ({ ...row, status: parseRaw(row.raw_json).status ?? "unknown" })), "status");
+  const lines = [
+    `- Pass: ${counts.pass ?? 0}`,
+    `- Fail: ${counts.fail ?? 0}`,
+    `- Unknown: ${counts.unknown ?? 0}`,
+    "",
+    "| Status | Control | Frameworks | Evidence | Remediation |",
+    "|---|---|---|---|---|"
+  ];
+  for (const row of rows) {
+    const raw = parseRaw(row.raw_json);
+    const evidence = Array.isArray(raw.evidence) && raw.evidence.length
+      ? raw.evidence.slice(0, 3).map((item: Row) => `${item.path ?? "repo"}:${item.line ?? "?"} ${item.note ?? ""}`).join("<br>")
+      : "No evidence found in indexed files.";
+    lines.push([
+      tableCell(raw.status ?? "unknown"),
+      tableCell(`${row.rule_id}: ${String(row.title ?? "").replace(/^(PASS|FAIL|UNKNOWN):\s*/i, "")}`),
+      tableCell([...(raw.controlIds ?? []), ...(raw.frameworks ?? [])].join(", ")),
+      tableCell(evidence),
+      tableCell(raw.remediation ?? row.message)
+    ].join(" | ").replace(/^/, "| ").replace(/$/, " |"));
+  }
+  return lines;
+}
+
 function tableCell(value: unknown): string {
   return escapeHtml(String(value ?? ""))
     .replaceAll("|", "\\|")
@@ -215,7 +246,7 @@ function groupAdditionalRows(rows: Row[]): Array<{ key: string; rows: Row[] }> {
 }
 
 function renderNoiseBucket(scannerResults: Row[]): string[] {
-  const lowSignal = scannerResults.filter((item) => item.severity === "low" || item.scanner === "quality");
+  const lowSignal = scannerResults.filter((item) => item.scanner !== "compliance").filter((item) => item.severity === "low" || item.scanner === "quality");
   if (!lowSignal.length) return ["No low-signal scanner noise recorded."];
   const groups = new Map<string, number>();
   for (const item of lowSignal) {
@@ -595,6 +626,13 @@ function reproductionSteps(item: Row): string[] {
       "3. Confirm whether schema validation rejects the payload before application logic uses it."
     ];
   }
+  if (text.includes("prototype")) {
+    return [
+      "1. Submit an object containing `__proto__`, `constructor`, or `prototype` keys to the cited input path.",
+      "2. Confirm whether those keys reach the merge or assignment sink.",
+      "3. Assert `Object.prototype` and security-sensitive defaults remain unchanged."
+    ];
+  }
   if (text.includes("secret") || text.includes("private key")) {
     return [
       "1. Confirm the file exists in the repository or deployment artifact.",
@@ -617,6 +655,7 @@ function dynamicValidationPlan(item: Row): string[] {
   if (text.includes("path") || text.includes("file")) return ["- In a temp directory fixture, try `../` traversal against the cited route/helper and assert reads stay inside the allowed base path."];
   if (text.includes("xss")) return ["- Render the cited path in a local browser/test renderer and assert payload is escaped, not executed."];
   if (text.includes("csrf")) return ["- Submit the cited state-changing request without token from a different origin in a local app instance and assert rejection."];
+  if (text.includes("prototype")) return ["- Add a unit test with `__proto__`, `constructor`, and `prototype` keys and assert they are rejected before merge/assignment."];
   return ["- Build a local regression test that exercises the cited source, sink, and missing control without touching external systems."];
 }
 
@@ -630,6 +669,7 @@ function patchDirection(item: Row): string {
   if (text.includes("csrf")) return "Add CSRF token generation to loaders/session state and validate token equality in every state-changing action.";
   if (text.includes("ssrf")) return "Validate hostnames with an allowlist such as `/^[a-z0-9-]+\\.myshopify\\.com$/i` before constructing outbound URLs.";
   if (text.includes("json.parse")) return "Replace raw `JSON.parse` with schema validation using zod or equivalent, and reject unexpected keys/types before persistence.";
+  if (text.includes("prototype")) return "Reject `__proto__`, `constructor`, and `prototype` keys recursively before object merge or assignment; prefer schema validation and safe merge helpers.";
   if (text.includes("auth tag") || text.includes("gcm")) return "Pass `{ authTagLength: 16 }` to `createDecipheriv` and reject ciphertext whose tag length is not exactly 16 bytes.";
   if (text.includes("secret") || text.includes("private key")) return "Remove the committed file/value, add it to `.gitignore`, rotate any real secret, and load it from secure runtime config.";
   return "Apply the remediation above and add a regression test for the vulnerable path.";

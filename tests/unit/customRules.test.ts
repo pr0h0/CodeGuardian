@@ -38,6 +38,20 @@ describe("custom rules", () => {
     expect(results.some((result) => result.ruleId === "ruby-command-exec-user-input")).toBe(true);
   });
 
+  it("flags JavaScript prototype pollution candidates", () => {
+    const results = runCustomRules([
+      file("src/settings.ts", "typescript", [
+        "merge(defaults, req.body);",
+        "target[req.query.key] = req.body.value;",
+        "config['__proto__'] = payload;"
+      ].join("\n"))
+    ]);
+
+    expect(results.some((result) => result.ruleId === "js-prototype-pollution-unsafe-merge")).toBe(true);
+    expect(results.some((result) => result.ruleId === "js-dynamic-object-key-assignment")).toBe(true);
+    expect(results.some((result) => result.ruleId === "js-prototype-pollution-assignment")).toBe(true);
+  });
+
   it("does not flag secret assignments loaded from runtime environment", () => {
     const results = runCustomRules([
       file("src/config.ts", "typescript", [

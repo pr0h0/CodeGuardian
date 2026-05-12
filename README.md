@@ -116,7 +116,7 @@ If `--target` is omitted, `test-web` uses `CODEGUARDIAN_DEFAULT_TARGET`. Set `CO
 
 ## Custom Rules
 
-Edit `rules/custom/dangerous-patterns.json`. Rules use JavaScript regular expressions and produce structured scanner results with file and line evidence.
+Edit `rules/custom/dangerous-patterns.json`. Rules use JavaScript regular expressions and produce structured scanner results with file and line evidence. Bundled rules include JavaScript prototype pollution candidates such as unsafe object merges, dynamic user-controlled property assignment, and direct `__proto__`/`constructor.prototype` mutation.
 
 ## Project Config
 
@@ -164,9 +164,14 @@ See `AI_INSTRUCTIONS.example.md`.
 - Built-in custom dangerous pattern scanner
 - Built-in taint-lite source-to-sink scanner
 - Built-in framework/config posture checks
+- Built-in SOC 2 / ISO 27001 compliance evidence checks
 - Lightweight quality checks
 
 Built-in language support is strongest for JS/TS, PHP, Ruby/Rails, Python, and common CLI entrypoints. Docker scanners add broader multi-language coverage.
+
+## Compliance Evidence
+
+Compliance checks are best-effort evidence mapping, not certification. Reports include a Compliance Evidence section with `pass`, `fail`, or `unknown` rows for selected SOC 2 and ISO 27001 controls: access control, session cookie protection, security logging, secret management, change management, vulnerability management, and cryptography/transport protection. `unknown` means the scanner did not find enough indexed source/config evidence to make a claim.
 
 ## Limitations
 
