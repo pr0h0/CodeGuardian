@@ -18,6 +18,7 @@ export function writeMarkdownReport(outDir: string, bundle: any, warnings: strin
   const findings = bundle.findings ?? [];
   const scanner = bundle.scannerResults ?? [];
   const compliance = scanner.filter((item: Row) => item.scanner === "compliance");
+  const attackChains = scanner.filter((item: Row) => item.scanner === "correlation");
   const codeFindings = findings.filter((item: Row) => item.category !== "dependency");
   const dependencyResults = scanner.filter(isDependencyVulnerabilityResult);
   const dependencyFindings = buildDependencyFindings(repoPath, dependencyResults);
@@ -35,12 +36,14 @@ export function writeMarkdownReport(outDir: string, bundle: any, warnings: strin
       `- Indexed files: ${(bundle.files ?? []).filter((file: Row) => file.indexed).length}`,
       `- Code findings: ${confirmedCodeFindings.length}`,
       `- Dependency findings: ${dependencyFindings.length}`,
+      `- Attack chains: ${attackChains.length}`,
       `- Compliance evidence rows: ${compliance.length}`,
       `- False positives: ${falsePositives.length}`,
       `- Suppressed findings: ${bundle.suppressions?.suppressed ?? 0}`
     ], true),
     ...renderSection("Action Plan", renderActionPlan(confirmedCodeFindings, dependencyFindings), true),
     ...renderSection("Top 5 Fix First", renderTopFixes(confirmedCodeFindings, dependencyFindings), true),
+    ...renderSection("Attack Chains", renderAttackChains(attackChains), true, `${attackChains.length} chains`),
     ...renderSection("Confirmed Code Findings", renderCodeFindings(buckets.confirmed, repoPath), true, `${buckets.confirmed.length} items`),
     ...renderSection("Suspected / Needs Validation", renderCodeFindings([...buckets.suspected, ...buckets.needsDynamic], repoPath), false, `${buckets.suspected.length + buckets.needsDynamic.length} items`),
     ...renderSection("Dependency Findings", dependencyFindings.length ? dependencyFindings.flatMap((item, index) => renderDependencyFinding(item, index + 1)) : ["No vulnerable dependency findings found."], false, `${dependencyFindings.length} items`),
@@ -62,7 +65,7 @@ export function writeMarkdownReport(outDir: string, bundle: any, warnings: strin
       `- AI instructions: ${bundle.aiInstructions?.loaded ? `${escapeHtml(bundle.aiInstructions.path)} (${bundle.aiInstructions.chars} chars)` : "not supplied"}`
     ], false),
     ...renderSection("Scanner Results", [
-      ...["semgrep", "gitleaks", "trivy", "osv-scanner", "bearer", "custom-rules", "taint-lite", "taint-flow", "config-checks", "compliance", "quality"].map((scannerName) => `- ${scannerName}: ${scanner.filter((item: Row) => item.scanner === scannerName).length} results`),
+      ...["semgrep", "gitleaks", "trivy", "osv-scanner", "bearer", "custom-rules", "taint-lite", "taint-flow", "config-checks", "correlation", "compliance", "quality"].map((scannerName) => `- ${scannerName}: ${scanner.filter((item: Row) => item.scanner === scannerName).length} results`),
       ...(bundle.incremental?.enabled ? [`- Incremental local scan: changed files ${bundle.incremental.changedFiles}, local scanner files ${bundle.incremental.localScannerFiles}`] : [])
     ], false),
     ...renderSection("Suppressions", bundle.suppressions?.suppressed ? [`- Suppressed: ${bundle.suppressions.suppressed}`, ...(bundle.suppressions.reasons ?? []).slice(0, 20).map((reason: string) => `- ${escapeHtml(reason)}`)] : ["- None"], false),
@@ -174,6 +177,7 @@ function renderAdditionalSastFindings(scannerResults: Row[], codeFindings: Row[]
   const represented = new Set([...codeFindings, ...falsePositives].map((finding) => `${finding.path ?? ""}:${finding.start_line ?? ""}`));
   const rows = scannerResults
     .filter((item) => !isDependencyVulnerabilityResult(item))
+    .filter((item) => item.scanner !== "correlation")
     .filter((item) => item.scanner !== "compliance")
     .filter((item) => item.scanner !== "quality")
     .filter((item) => !represented.has(`${item.path ?? ""}:${item.start_line ?? ""}`))
@@ -200,6 +204,36 @@ function renderAdditionalSastFindings(scannerResults: Row[], codeFindings: Row[]
   }
   if (grouped.length > limited.length) lines.push(`- Omitted ${grouped.length - limited.length} additional grouped SAST findings from report view.`);
   return lines;
+}
+
+function renderAttackChains(rows: Row[]): string[] {
+  if (!rows.length) return ["No attack-chain correlations recorded."];
+  return rows.flatMap((row, index) => {
+    const raw = parseRaw(row.raw_json);
+    const chain = raw.attackChain ?? {};
+    const evidence = Array.isArray(raw.evidence) ? raw.evidence : [];
+    const related = Array.isArray(raw.relatedFindings) ? raw.relatedFindings : [];
+    const steps = Array.isArray(chain.steps) ? chain.steps : [];
+    const validation = Array.isArray(chain.validation) ? chain.validation : [];
+    return renderItemDetails(`${index + 1}. ${escapeHtml(row.severity)} ${escapeHtml(row.title)} @${escapeHtml(row.path ?? "unknown")}:${row.start_line ?? "?"}`, [
+      `- Category: ${escapeHtml(row.category ?? "security")}`,
+      `- Chain type: ${escapeHtml(chain.kind ?? row.rule_id ?? "correlation")}`,
+      `- Impact: ${escapeHtml(chain.impact ?? row.message ?? "Possible chained exploit path.")}`,
+      `- Confidence: ${escapeHtml(chain.confidence ?? "medium")}`,
+      "",
+      "### Chain Steps",
+      ...(steps.length ? steps.map((step: string, stepIndex: number) => `${stepIndex + 1}. ${escapeHtml(step)}`) : [`1. ${escapeHtml(row.message ?? "Review related findings together.")}`]),
+      "",
+      "### Evidence",
+      ...(evidence.length ? evidence.map((item: Row) => `- ${escapeHtml(item.path ?? "repo")}:${item.line ?? "?"} ${escapeHtml(item.note ?? "")}`) : ["- No structured evidence recorded."]),
+      "",
+      "### Related Findings",
+      ...(related.length ? related.map((item: Row) => `- ${escapeHtml(item.scanner)}/${escapeHtml(item.ruleId)} ${escapeHtml(item.severity)} ${escapeHtml(item.title)} @${escapeHtml(item.path ?? "unknown")}:${item.startLine ?? "?"}`) : ["- None recorded."]),
+      "",
+      "### Safe Validation",
+      ...(validation.length ? validation.map((step: string) => `- ${escapeHtml(step)}`) : dynamicValidationPlan(row))
+    ], index === 0);
+  });
 }
 
 function renderComplianceEvidence(rows: Row[]): string[] {
@@ -258,7 +292,7 @@ function renderNoiseBucket(scannerResults: Row[]): string[] {
 
 function scannerSortWeight(item: Row): number {
   const severityOrder: Record<string, number> = { critical: 0, high: 1, medium: 2, low: 3, info: 4 };
-  const scannerOrder: Record<string, number> = { "taint-flow": 0, "taint-lite": 1, "config-checks": 2, bearer: 3, semgrep: 4, gitleaks: 5, "custom-rules": 6 };
+  const scannerOrder: Record<string, number> = { correlation: 0, "taint-flow": 1, "taint-lite": 2, "config-checks": 3, bearer: 4, semgrep: 5, gitleaks: 6, "custom-rules": 7 };
   return (severityOrder[item.severity] ?? 5) * 10 + (scannerOrder[item.scanner] ?? 9);
 }
 
@@ -564,6 +598,7 @@ function scoreCodeExploitability(item: Row): number {
 function reachability(item: Row): string {
   const text = `${item.path} ${item.reasoning} ${item.source} ${item.sink}`.toLowerCase();
   if (/\.env|private key|secret/.test(text)) return "Reachable if repository, deployment bundle, or host filesystem is exposed.";
+  if (/host header|x-forwarded|proxy header|admin/.test(text)) return "Potentially reachable through spoofed HTTP Host/proxy headers if proxy configuration does not overwrite them.";
   if (/route|form|request|fetcher|webhook|api|action|loader/.test(text)) return "Likely reachable through application route or request handler.";
   if (/export|email|csv|shopify|product|database/.test(text)) return "Reachable through application workflow or stored data path.";
   return "Reachability needs manual validation.";
@@ -619,6 +654,13 @@ function reproductionSteps(item: Row): string[] {
       "3. Confirm whether the server attempts the outbound request."
     ];
   }
+  if (text.includes("host header") || text.includes("x-forwarded") || text.includes("proxy header")) {
+    return [
+      "1. In a local app/proxy setup, send the cited admin route with a spoofed `Host`, `X-Forwarded-Host`, or `X-Forwarded-For` header.",
+      "2. Confirm whether access changes without a real trusted proxy assertion.",
+      "3. Verify production proxy config overwrites untrusted forwarding headers."
+    ];
+  }
   if (text.includes("json.parse")) {
     return [
       "1. Submit malformed or unexpected JSON to the reported form field.",
@@ -652,6 +694,7 @@ function dynamicValidationPlan(item: Row): string[] {
   if (item.status === "confirmed_true_positive") return ["- Already evidence-backed by static/AI verification. Add a regression test around the cited source-to-sink path."];
   if (text.includes("command")) return ["- In a local fixture only, replace shell sink with a spy/stub and assert attacker-controlled argument reaches it.", "- Do not execute attacker-controlled commands during validation."];
   if (text.includes("ssrf")) return ["- In a local fixture only, point outbound calls at a loopback canary server and assert whether untrusted URL/host is requested.", "- Block real external/internal network targets during validation."];
+  if (text.includes("host header") || text.includes("x-forwarded") || text.includes("proxy header")) return ["- Add route tests that spoof `Host`, `X-Forwarded-Host`, and `X-Forwarded-For`; assert admin access is denied unless trusted proxy middleware set verified values."];
   if (text.includes("path") || text.includes("file")) return ["- In a temp directory fixture, try `../` traversal against the cited route/helper and assert reads stay inside the allowed base path."];
   if (text.includes("xss")) return ["- Render the cited path in a local browser/test renderer and assert payload is escaped, not executed."];
   if (text.includes("csrf")) return ["- Submit the cited state-changing request without token from a different origin in a local app instance and assert rejection."];
@@ -668,6 +711,7 @@ function patchDirection(item: Row): string {
   if (text.includes("xss") || text.includes("html")) return "Add an HTML escaping/sanitization helper at the boundary where untrusted data enters templates, emails, or stored HTML fields.";
   if (text.includes("csrf")) return "Add CSRF token generation to loaders/session state and validate token equality in every state-changing action.";
   if (text.includes("ssrf")) return "Validate hostnames with an allowlist such as `/^[a-z0-9-]+\\.myshopify\\.com$/i` before constructing outbound URLs.";
+  if (text.includes("host header") || text.includes("x-forwarded") || text.includes("proxy header")) return "Do not authorize admin/internal routes from raw Host or forwarding headers. Use authenticated admin roles or trusted proxy-normalized values only.";
   if (text.includes("json.parse")) return "Replace raw `JSON.parse` with schema validation using zod or equivalent, and reject unexpected keys/types before persistence.";
   if (text.includes("prototype")) return "Reject `__proto__`, `constructor`, and `prototype` keys recursively before object merge or assignment; prefer schema validation and safe merge helpers.";
   if (text.includes("auth tag") || text.includes("gcm")) return "Pass `{ authTagLength: 16 }` to `createDecipheriv` and reject ciphertext whose tag length is not exactly 16 bytes.";

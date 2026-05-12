@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import type { IndexedFile } from "../../src/repo/repoIndexer.js";
 import { runComplianceChecks } from "../../src/scanners/compliance.js";
 import { runConfigChecks } from "../../src/scanners/configChecks.js";
+import { runCorrelationChecks } from "../../src/scanners/correlations.js";
 import { applySuppressions } from "../../src/scanners/suppressions.js";
 import { runTaintLite } from "../../src/scanners/taintLite.js";
 
@@ -48,6 +49,51 @@ describe("new scanner helpers", () => {
     const secret = results.find((result) => result.ruleId === "compliance-secret-management");
     expect((secret?.raw as any).status).toBe("fail");
     expect(secret?.severity).toBe("high");
+  });
+
+  it("correlates prototype pollution with Eta dependency RCE", () => {
+    const results = runCorrelationChecks([
+      file("src/view.ts", "typescript", "import { Eta } from 'eta';\nnew Eta().render(template, data);")
+    ], [
+      { scanner: "custom-rules", ruleId: "js-prototype-pollution-unsafe-merge", title: "User-controlled object merge candidate", category: "prototype-pollution", severity: "high", path: "src/app.ts", startLine: 10, message: "merge(defaults, req.body)" },
+      { scanner: "osv-scanner", ruleId: "GHSA-eta", title: "eta remote code execution", category: "dependency", severity: "critical", path: "package-lock.json", message: "eta vulnerable to RCE", raw: { package: { name: "eta" }, summary: "Remote Code Execution" } }
+    ]);
+
+    expect(results.some((result) => result.ruleId === "prototype-pollution-to-eta-rce" && result.severity === "critical")).toBe(true);
+    expect(results.some((result) => result.ruleId === "reachable-rce-eta")).toBe(true);
+  });
+
+  it("detects host and proxy header admin gates across frameworks", () => {
+    const results = runCorrelationChecks([
+      file("src/server.ts", "typescript", [
+        "app.get('/admin', (req, res, next) => {",
+        "  if (process.env.NODE_ENV === 'production' && req.host === 'admin.example.com') return next();",
+        "});",
+        "app.get('/internal', (req, res, next) => {",
+        "  if (req.headers['x-forwarded-for'] === '127.0.0.1') return next();",
+        "});"
+      ].join("\n")),
+      file("app.py", "python", [
+        "@app.route('/admin')",
+        "def admin():",
+        "  if request.headers.get('Host') == 'admin.example.com':",
+        "    return True"
+      ].join("\n")),
+      file("app/controllers/admin_controller.rb", "ruby", [
+        "def index",
+        "  return true if request.host == 'admin.example.com' && Rails.env.production?",
+        "end"
+      ].join("\n")),
+      file("routes/web.php", "php", [
+        "$router->get('/admin', function () use ($request) {",
+        "  if ($_SERVER['HTTP_X_FORWARDED_FOR'] === '127.0.0.1') { return true; }",
+        "});"
+      ].join("\n"))
+    ], []);
+
+    expect(results.some((result) => result.ruleId === "host-header-admin-gate")).toBe(true);
+    expect(results.some((result) => result.ruleId === "proxy-header-admin-gate")).toBe(true);
+    expect(results.filter((result) => result.ruleId === "host-header-admin-gate").length).toBeGreaterThanOrEqual(3);
   });
 
   it("applies inline and file suppressions", () => {

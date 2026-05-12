@@ -42,7 +42,7 @@ export interface FunctionSinkModel {
 
 const supported = new Set([".js", ".jsx", ".ts", ".tsx", ".py", ".php", ".rb"]);
 
-export const sourcePattern = /\b(?:req\.(?:query|body|params|headers|cookies)|request\.(?:query|body|params|headers|args|form|json|files)|params(?:\[[^\]]+\])?|\$_(?:GET|POST|REQUEST|COOKIE|FILES)|ARGV|process\.argv|sys\.argv)\b/i;
+export const sourcePattern = /\b(?:req\.(?:query|body|params|headers|cookies|host|hostname|ip|ips)|req\.get\(['"][^'"]+['"]\)|request\.(?:query|body|params|headers|args|form|json|files|host|remote_addr|META|GET|POST|COOKIES)|params(?:\[[^\]]+\])?|cookies(?:\[[^\]]+\])?|x-forwarded-(?:for|host)|x-real-ip|HTTP_(?:HOST|X_FORWARDED_FOR|X_FORWARDED_HOST|X_REAL_IP)|request\.get(?:Parameter|Header)\(|Request\.(?:Query|Form|Headers|Cookies|Host)|r\.(?:URL\.Query|FormValue|Header\.Get|Cookie|Host|RemoteAddr)\b|\$_(?:GET|POST|REQUEST|COOKIE|FILES|SERVER)|ARGV|process\.argv|sys\.argv)\b/i;
 
 export const sanitizerPattern = /\b(?:sanitize|escape|validate|schema|zod|joi|allowlist|whitelist|realpath|normalize|basename|prepared|parameterized|encodeURIComponent|htmlspecialchars)\b/i;
 
@@ -52,6 +52,7 @@ export const sinkSpecs: SinkSpec[] = [
   { id: "flow-filesystem", category: "path-traversal", title: "User-controlled value reaches filesystem sink", severity: "high", regex: /\b(?:readFile|writeFile|createReadStream|open|File\.(?:read|open|write|delete)|IO\.read|file_get_contents|fopen|readfile|unlink|send_file|sendFile)\s*\(/ },
   { id: "flow-ssrf", category: "ssrf", title: "User-controlled value reaches outbound request sink", severity: "high", regex: /\b(?:fetch|axios\.|request\(|http\.get|https\.get|Net::HTTP\.(?:get|get_response|post)|URI\.open|Faraday\.(?:get|post)|HTTParty\.(?:get|post)|curl_setopt)\s*\(/ },
   { id: "flow-xss", category: "xss", title: "User-controlled value reaches HTML rendering sink", severity: "high", regex: /\b(?:innerHTML|dangerouslySetInnerHTML|render\s+inline|v-html)\b/ },
+  { id: "flow-template", category: "template-injection", title: "User-controlled value reaches template rendering sink", severity: "high", regex: /\b(?:res\.render|reply\.view|eta\.render|Eta\.render|renderFile|renderString|render_template|Template\(|template\.render|render_to_string|render\s+inline|ERB\.new|Twig\\Environment|Blade::render|view\s*\(|templateEngine\.process|ModelAndView|template\s*\()\s*\(/ },
   { id: "flow-deserialization", category: "deserialization", title: "User-controlled value reaches unsafe deserialization sink", severity: "high", regex: /\b(?:unserialize|Marshal\.load|YAML\.load|Psych\.load|pickle\.loads?)\s*\(/ }
 ];
 

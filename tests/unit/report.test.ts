@@ -165,6 +165,41 @@ describe("report", () => {
     expect(content).toContain("No additional SAST findings outside promoted code findings.");
   });
 
+  it("renders attack chains outside additional SAST findings", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cg-"));
+    const file = writeMarkdownReport(dir, {
+      scan: { id: "1", repo_path: ".", status: "completed" },
+      files: [],
+      findings: [],
+      scannerResults: [{
+        scanner: "correlation",
+        rule_id: "prototype-pollution-to-eta-rce",
+        title: "Prototype pollution can enable Eta template RCE",
+        category: "rce",
+        severity: "critical",
+        path: "src/app.ts",
+        start_line: 10,
+        message: "chain",
+        raw_json: JSON.stringify({
+          attackChain: {
+            kind: "prototype-pollution-rce",
+            impact: "Possible remote code execution",
+            confidence: "medium",
+            steps: ["pollute prototype", "render through eta"],
+            validation: ["stub process APIs"]
+          },
+          evidence: [{ path: "src/app.ts", line: 10, note: "merge(defaults, req.body)" }],
+          relatedFindings: [{ scanner: "custom-rules", ruleId: "js-prototype-pollution-unsafe-merge", severity: "high", title: "merge", path: "src/app.ts", startLine: 10 }]
+        })
+      }]
+    });
+
+    const content = fs.readFileSync(file, "utf8");
+    expect(content).toContain("Attack Chains");
+    expect(content).toContain("Possible remote code execution");
+    expect(content).toContain("No additional SAST findings outside promoted code findings.");
+  });
+
   it("writes searchable html report", () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cg-"));
     const file = writeHtmlReport(dir, {

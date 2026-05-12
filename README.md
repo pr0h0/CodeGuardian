@@ -52,6 +52,7 @@ AI mode has two passes:
 Reports default to timestamped files such as `codeguardian-report/report-APP-YYYY-MM-DD-HHMMSS.md`, `.json`, and `.sarif`.
 
 Reports include baseline diff, top-fix-first ordering, grouped low-signal noise, dependency reachability hints, CWE/OWASP metadata where known, and suppressions.
+Correlation checks connect related signals, such as prototype pollution plus vulnerable Eta template engine dependency RCE, reachable vulnerable dependencies, or spoofable Host / proxy headers used to gate admin routes across Express/Next, Flask/Django, Laravel/PHP, Rails/Ruby, Spring/Java, ASP.NET, and Go HTTP handlers.
 
 Suppress findings with `.codeguardianignore` or inline comments:
 
@@ -165,6 +166,7 @@ See `AI_INSTRUCTIONS.example.md`.
 - Built-in taint-lite source-to-sink scanner
 - Built-in framework/config posture checks
 - Built-in SOC 2 / ISO 27001 compliance evidence checks
+- Built-in chained-risk correlation checks
 - Lightweight quality checks
 
 Built-in language support is strongest for JS/TS, PHP, Ruby/Rails, Python, and common CLI entrypoints. Docker scanners add broader multi-language coverage.

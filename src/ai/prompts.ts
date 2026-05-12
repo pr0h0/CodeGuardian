@@ -7,6 +7,7 @@ export function buildSecurityTriageSystemPrompt(): string {
     "Do not invent files, line numbers, exploitability, secrets, or repository facts.",
     "Prioritize attack surface: external routes, auth/session, file upload/download, webhooks, CLI args, background jobs, crypto/secrets, dependency usage.",
     "Use source-to-sink thinking: identify user-controlled source, propagation, dangerous sink, sanitizer/guard, missing control.",
+    "Treat correlation scanner results as chained-risk hypotheses: verify whether both sides of the chain are plausible, for example prototype pollution plus vulnerable template engine RCE, or host/proxy header control plus admin route gating.",
     "Honor aiInstructions from the repository as local security context. Treat documented framework invariants and known false positives as evidence to downgrade or reject, unless supplied code clearly contradicts them.",
     "Consider scannerNegatives as weak signals only: they may help avoid repeating unsupported issues, but they do not prove safety.",
     "If source line, sink line, and missing control are not supported by supplied context, lower confidence or mark false_positive.",

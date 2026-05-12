@@ -14,6 +14,7 @@ export function writeHtmlReport(outDir: string, bundle: any, warnings: string[] 
   const falsePositives = codeFindings.filter((item: Row) => item.status === "false_positive");
   const dependencies = scanner.filter(isDependencyVulnerabilityResult);
   const compliance = scanner.filter((item: Row) => item.scanner === "compliance");
+  const attackChains = scanner.filter((item: Row) => item.scanner === "correlation");
   const additionalSast = additionalSastRows(scanner, activeFindings, falsePositives);
   const html = renderDocument({
     repoPath,
@@ -22,6 +23,7 @@ export function writeHtmlReport(outDir: string, bundle: any, warnings: string[] 
     falsePositives,
     dependencies,
     compliance,
+    attackChains,
     additionalSast,
     scanner,
     files: bundle.files ?? [],
@@ -39,6 +41,7 @@ function renderDocument(input: {
   falsePositives: Row[];
   dependencies: Row[];
   compliance: Row[];
+  attackChains: Row[];
   additionalSast: Row[];
   scanner: Row[];
   files: Row[];
@@ -100,11 +103,13 @@ function renderDocument(input: {
       ${metric("Critical/High", (severityCounts.critical ?? 0) + (severityCounts.high ?? 0))}
       ${metric("Additional SAST", input.additionalSast.length)}
       ${metric("Dependencies", input.dependencies.length)}
+      ${metric("Attack Chains", input.attackChains.length)}
       ${metric("Compliance", input.compliance.length)}
       ${metric("False Positives", input.falsePositives.length)}
       ${metric("Indexed Files", input.files.filter((file) => file.indexed).length)}
     </div>
     ${section("Fix First", renderFixFirst(input.activeFindings), true)}
+    ${section("Attack Chains", renderAttackChainTable(input.attackChains), true)}
     ${section("Code Findings", renderFindings(input.repoPath, input.activeFindings), true)}
     ${section("Additional SAST Findings", renderAdditionalSastTable(input.additionalSast), false)}
     ${section("Dependency Findings", renderDependencyTable(input.dependencies), false)}
@@ -216,6 +221,25 @@ function renderComplianceTable(rows: Row[]): string {
   }).join("")}</tbody></table>`;
 }
 
+function renderAttackChainTable(rows: Row[]): string {
+  if (!rows.length) return "<p>No attack-chain correlations recorded.</p>";
+  return `<table><thead><tr><th>Severity</th><th>Chain</th><th>Impact</th><th>Evidence</th><th>Safe validation</th></tr></thead><tbody>${rows.map((item) => {
+    const raw = parseRaw(item.raw_json);
+    const chain = raw.attackChain ?? {};
+    const evidence = Array.isArray(raw.evidence) && raw.evidence.length
+      ? raw.evidence.slice(0, 3).map((entry: Row) => `${entry.path ?? "repo"}:${entry.line ?? "?"} ${entry.note ?? ""}`).join("\n")
+      : item.message;
+    const validation = Array.isArray(chain.validation) && chain.validation.length ? chain.validation.slice(0, 3).join("\n") : "Review related findings together in a safe local environment.";
+    return row(item, [
+      item.severity,
+      `${item.rule_id}: ${item.title}`,
+      chain.impact ?? item.message,
+      evidence,
+      validation
+    ]);
+  }).join("")}</tbody></table>`;
+}
+
 function renderScannerCounts(rows: Row[]): string {
   const counts = countBy(rows, "scanner");
   return `<table><thead><tr><th>Scanner</th><th>Count</th></tr></thead><tbody>${Object.entries(counts).map(([name, count]) => `<tr><td>${esc(name)}</td><td>${count}</td></tr>`).join("")}</tbody></table>`;
@@ -229,6 +253,7 @@ function additionalSastRows(scannerResults: Row[], codeFindings: Row[], falsePos
   const represented = new Set([...codeFindings, ...falsePositives].map((finding) => `${finding.path ?? ""}:${finding.start_line ?? ""}`));
   return scannerResults
     .filter((item) => !isDependencyVulnerabilityResult(item))
+    .filter((item) => item.scanner !== "correlation")
     .filter((item) => item.scanner !== "compliance")
     .filter((item) => item.scanner !== "quality")
     .filter((item) => !represented.has(`${item.path ?? ""}:${item.start_line ?? ""}`))

@@ -31,7 +31,7 @@ export function isDependencyVulnerabilityScannerResult(result: ScannerResult): b
 export function scoreScannerResult(result: { scanner: string; severity: string; category?: string; path?: string; raw?: unknown }): number {
   const severityScore: Record<string, number> = { critical: 100, high: 80, medium: 50, low: 20, info: 5 };
   let score = severityScore[result.severity] ?? 10;
-  if (["taint-flow", "taint-lite", "gitleaks", "config-checks"].includes(result.scanner)) score += 12;
+  if (["correlation", "taint-flow", "taint-lite", "gitleaks", "config-checks"].includes(result.scanner)) score += 12;
   if (/(route|controller|auth|admin|api|bin\/|cli|command|worker|job)/i.test(result.path ?? "")) score += 10;
   if (["command-injection", "deserialization", "ssrf", "secrets"].includes(result.category ?? "")) score += 8;
   if (String(JSON.stringify(result.raw ?? {})).includes("sourceLine")) score += 8;
