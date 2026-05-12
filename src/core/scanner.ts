@@ -17,8 +17,10 @@ import { applySuppressions } from "../scanners/suppressions.js";
 import { deterministicFinding, aiTriage } from "../ai/triage.js";
 import { runExploratoryAudit } from "../ai/audit.js";
 import { aiFastModel, aiStrongModel, createAiProvider } from "../ai/provider.js";
+import type { AiProvider } from "../ai/types.js";
 import { buildContextPack } from "../repo/contextPackBuilder.js";
 import { loadAiInstructions } from "../repo/aiInstructions.js";
+import type { IndexedFile } from "../repo/repoIndexer.js";
 import { writeJsonReport } from "../reports/json.js";
 import { writeMarkdownReport } from "../reports/markdown.js";
 import { writeSarifReport } from "../reports/sarif.js";
@@ -30,6 +32,7 @@ import { checkTool } from "../tools/commandRunner.js";
 import { buildBaselineDiff } from "./baseline.js";
 import { attachFindingFingerprints, attachScannerFingerprints } from "./fingerprint.js";
 import { ruleAllowedByProfile } from "../config/projectConfig.js";
+import { planAiTriageCandidates } from "./triagePlanner.js";
 import { scannerImages } from "../scanners/dockerFallback.js";
 import type { ScannerResult, Finding } from "../scanners/types.js";
 import { sha256 } from "../utils/hashing.js";
@@ -123,19 +126,26 @@ export async function runScan(ctx: RunContext): Promise<{ scanId: string; report
     ctx.logger.info(`scanners: total ${scannerResults.length} results`);
     ctx.logger.info("db: storing scanner results");
     for (const result of scannerResults) insertScannerResult(db, scanId, result);
-    const highSignal = scannerResults.filter((result) => ["critical", "high", "medium"].includes(result.severity)).sort((a, b) => scoreScannerResult(b) - scoreScannerResult(a)).slice(0, ctx.options.maxAiFindings);
-    ctx.logger.info(`triage: selected ${highSignal.length} high-signal results max=${ctx.options.maxAiFindings}`);
-    ctx.logger.info("context: building AI context packs");
-    const contextPacks = highSignal.map((result, index) => {
-      ctx.logger.info(`context: pack ${index + 1}/${highSignal.length} ${result.scanner}/${result.ruleId} ${result.path ?? ""}:${result.startLine ?? ""}`);
-      return buildContextPack(result, files, scannerResults, ctx.env.CODEGUARDIAN_MAX_CONTEXT_CHARS, aiInstructions.content);
-    });
-    const aiBudget = { triageContextChars: contextPacks.reduce((sum, pack) => sum + JSON.stringify(pack).length, 0), estimatedTriageTokens: 0 };
-    aiBudget.estimatedTriageTokens = Math.ceil(aiBudget.triageContextChars / 4);
-    if (contextPacks.length) ctx.logger.info(`ai-budget: triage context chars=${aiBudget.triageContextChars} estimatedTokens=${aiBudget.estimatedTriageTokens}`);
+    const triageCandidates = planAiTriageCandidates(scannerResults, ctx.options.maxAiFindings);
+    const targetActiveFindings = Math.min(ctx.options.aiTriageTargetCodeFindings, ctx.options.maxAiFindings);
+    ctx.logger.info(`triage: planned ${triageCandidates.length} AI scanner candidates max=${ctx.options.maxAiFindings} targetActive=${targetActiveFindings}`);
+    const aiBudget = { triageContextChars: 0, estimatedTriageTokens: 0, triagedScannerResults: 0, triageTargetCodeFindings: targetActiveFindings };
     const findings = aiProvider
-      ? await aiTriage(aiProvider, contextPacks, (message) => ctx.logger.info(message), criticProvider, createRequestedContextResolver(files, ctx.env.CODEGUARDIAN_MAX_CONTEXT_CHARS))
+      ? await runAiTriageBatches({
+        provider: aiProvider,
+        criticProvider,
+        candidates: triageCandidates,
+        files,
+        scannerResults,
+        aiInstructions: aiInstructions.content,
+        maxContextChars: ctx.env.CODEGUARDIAN_MAX_CONTEXT_CHARS,
+        targetActiveFindings,
+        log: (message) => ctx.logger.info(message),
+        aiBudget
+      })
       : scannerResults.map(deterministicFinding);
+    aiBudget.estimatedTriageTokens = Math.ceil(aiBudget.triageContextChars / 4);
+    if (aiBudget.triagedScannerResults) ctx.logger.info(`ai-budget: triaged=${aiBudget.triagedScannerResults} context chars=${aiBudget.triageContextChars} estimatedTokens=${aiBudget.estimatedTriageTokens}`);
     if (aiProvider && ctx.options.aiAudit) {
       ctx.logger.info(`ai-audit: enabled maxFiles=${ctx.options.maxAiAuditFiles} maxRounds=${ctx.options.maxAiAuditRounds} maxChars=${ctx.options.maxAiAuditChars}`);
       const auditFindings = await runExploratoryAudit(criticProvider ?? aiProvider, files, scannerResults, {
@@ -191,6 +201,43 @@ function createRequestedContextResolver(files: Array<{ path: string; content: st
     });
     return { files: fileContexts, symbols: symbolContexts, missing };
   };
+}
+
+async function runAiTriageBatches(input: {
+  provider: AiProvider;
+  criticProvider?: AiProvider;
+  candidates: ScannerResult[];
+  files: IndexedFile[];
+  scannerResults: ScannerResult[];
+  aiInstructions: string;
+  maxContextChars: number;
+  targetActiveFindings: number;
+  log: (message: string) => void;
+  aiBudget: { triageContextChars: number; triagedScannerResults: number };
+}): Promise<Finding[]> {
+  const batchSize = 25;
+  const findings: Finding[] = [];
+  const resolveRequestedContext = createRequestedContextResolver(input.files, input.maxContextChars);
+  for (let offset = 0; offset < input.candidates.length; offset += batchSize) {
+    const batch = input.candidates.slice(offset, offset + batchSize);
+    input.log(`triage: auditing scanner batch ${Math.floor(offset / batchSize) + 1} results=${batch.length} active=${activeFindingCount(findings)}/${input.targetActiveFindings}`);
+    const contextPacks = batch.map((result, index) => {
+      input.log(`context: pack ${offset + index + 1}/${input.candidates.length} ${result.scanner}/${result.ruleId} ${result.path ?? ""}:${result.startLine ?? ""}`);
+      return buildContextPack(result, input.files, input.scannerResults, input.maxContextChars, input.aiInstructions);
+    });
+    input.aiBudget.triageContextChars += contextPacks.reduce((sum, pack) => sum + JSON.stringify(pack).length, 0);
+    input.aiBudget.triagedScannerResults += contextPacks.length;
+    findings.push(...await aiTriage(input.provider, contextPacks, input.log, input.criticProvider, resolveRequestedContext));
+    if (input.targetActiveFindings > 0 && activeFindingCount(findings) >= input.targetActiveFindings) {
+      input.log(`triage: target active code findings reached ${activeFindingCount(findings)}/${input.targetActiveFindings}`);
+      break;
+    }
+  }
+  return findings;
+}
+
+function activeFindingCount(findings: Finding[]): number {
+  return findings.filter((finding) => finding.status !== "false_positive" && finding.category !== "dependency").length;
 }
 
 function findSymbolContexts(files: Array<{ path: string; content: string; lineCount: number }>, query: string, remaining: { chars: number }) {
@@ -273,16 +320,6 @@ function applyTriageMemory(db: ReturnType<typeof openDatabase>, repoPath: string
     }
     return finding;
   });
-}
-
-function scoreScannerResult(result: { scanner: string; severity: string; category?: string; path?: string; raw?: unknown }): number {
-  const severityScore: Record<string, number> = { critical: 100, high: 80, medium: 50, low: 20, info: 5 };
-  let score = severityScore[result.severity] ?? 10;
-  if (["taint-flow", "taint-lite", "gitleaks", "config-checks"].includes(result.scanner)) score += 12;
-  if (/(route|controller|auth|admin|api|bin\/|cli|command|worker|job)/i.test(result.path ?? "")) score += 10;
-  if (["command-injection", "deserialization", "ssrf", "secrets"].includes(result.category ?? "")) score += 8;
-  if (String(JSON.stringify(result.raw ?? {})).includes("sourceLine")) score += 8;
-  return score;
 }
 
 async function runLoggedScanner(ctx: RunContext, db: ReturnType<typeof openDatabase>, scanId: string, name: string, run: () => Promise<{ results: unknown[]; warning?: string; code?: number | null }>): Promise<{ results: any[]; warning?: string }> {

@@ -23,6 +23,7 @@ function addScanOptions(command: Command): Command {
     .option("--max-files <number>", "max files", parseInt)
     .option("--max-file-size <bytes>", "max file size", parseInt)
     .option("--max-ai-findings <number>", "max high-signal scanner results to send to AI", parseInt)
+    .option("--ai-triage-target <number>", "keep triaging scanner results until this many active code findings are found or max-ai-findings is reached", parseInt)
     .option("--ai-audit", "enable AI exploratory source audit")
     .option("--no-ai-audit", "disable AI exploratory source audit")
     .option("--max-ai-audit-files <number>", "max source files AI exploratory audit may inspect", parseInt)

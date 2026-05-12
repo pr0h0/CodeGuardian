@@ -16,6 +16,7 @@ export interface CliOptions {
   maxFiles?: number;
   maxFileSize?: number;
   maxAiFindings?: number;
+  aiTriageTarget?: number;
   aiAudit?: boolean;
   maxAiAuditFiles?: number;
   maxAiAuditRounds?: number;
@@ -36,7 +37,9 @@ export interface RunContext {
   projectConfig: ProjectConfig;
   repoPath: string;
   outDir: string;
-  options: Required<Omit<CliOptions, "provider" | "model" | "target">> & Pick<CliOptions, "provider" | "model" | "target">;
+  options: Required<Omit<CliOptions, "provider" | "model" | "target" | "aiTriageTarget">>
+    & Pick<CliOptions, "provider" | "model" | "target">
+    & { aiTriageTargetCodeFindings: number };
 }
 
 export function createRunContext(repoPath: string, options: CliOptions = {}): RunContext {
@@ -59,6 +62,7 @@ export function createRunContext(repoPath: string, options: CliOptions = {}): Ru
       maxFiles: options.maxFiles ?? Number.MAX_SAFE_INTEGER,
       maxFileSize: options.maxFileSize ?? env.CODEGUARDIAN_MAX_FILE_SIZE,
       maxAiFindings: Math.min(options.maxAiFindings ?? projectConfig.maxAiFindings ?? env.CODEGUARDIAN_MAX_AI_FINDINGS, env.CODEGUARDIAN_MAX_AI_FINDINGS_LIMIT),
+      aiTriageTargetCodeFindings: Math.min(options.aiTriageTarget ?? projectConfig.aiTriageTargetCodeFindings ?? env.CODEGUARDIAN_AI_TRIAGE_TARGET_CODE_FINDINGS, options.maxAiFindings ?? projectConfig.maxAiFindings ?? env.CODEGUARDIAN_MAX_AI_FINDINGS),
       aiAudit: options.aiAudit ?? env.CODEGUARDIAN_AI_AUDIT.toLowerCase() !== "false",
       maxAiAuditFiles: options.maxAiAuditFiles ?? projectConfig.maxAiAuditFiles ?? env.CODEGUARDIAN_AI_AUDIT_MAX_FILES,
       maxAiAuditRounds: options.maxAiAuditRounds ?? projectConfig.maxAiAuditRounds ?? env.CODEGUARDIAN_AI_AUDIT_MAX_ROUNDS,

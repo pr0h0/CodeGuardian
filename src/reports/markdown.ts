@@ -135,6 +135,8 @@ function renderScannerRuns(runs: Row[]): string[] {
 function renderAiBudget(budget?: Row): string[] {
   if (!budget) return ["- AI was not used or budget metadata was not recorded."];
   return [
+    `- Scanner results AI-triaged: ${budget.triagedScannerResults ?? 0}`,
+    `- Active code-finding target: ${budget.triageTargetCodeFindings ?? "not recorded"}`,
     `- Triage context chars: ${budget.triageContextChars ?? 0}`,
     `- Estimated triage tokens: ${budget.estimatedTriageTokens ?? 0}`
   ];

@@ -9,6 +9,7 @@ const schema = z.object({
   failOn: z.enum(["critical", "high", "medium", "low", "none"]).optional(),
   maxAdditionalSastFindings: z.number().int().positive().optional(),
   maxAiFindings: z.number().int().positive().optional(),
+  aiTriageTargetCodeFindings: z.number().int().positive().optional(),
   maxAiAuditFiles: z.number().int().positive().optional(),
   maxAiAuditRounds: z.number().int().positive().optional(),
   maxAiAuditChars: z.number().int().positive().optional(),

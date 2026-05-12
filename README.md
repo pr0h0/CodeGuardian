@@ -37,6 +37,7 @@ codeguardian index ./some-repo
 codeguardian scan ./some-repo --no-ai --format all
 codeguardian scan ./some-repo --ai --provider openai --model gpt-4.1-mini
 codeguardian scan ./some-repo --ai --max-ai-findings 50
+codeguardian scan ./some-repo --ai --max-ai-findings 150 --ai-triage-target 40
 codeguardian scan ./some-repo --ai --max-ai-audit-files 80 --max-ai-audit-rounds 10
 codeguardian scan ./some-repo --baseline latest
 codeguardian scan ./some-repo --profile cli --incremental
@@ -45,7 +46,7 @@ codeguardian report <scanId>
 
 AI mode has two passes:
 
-- Scanner-result triage: sends compact context packs for high-signal scanner findings.
+- Scanner-result triage: sends compact context packs for high-signal scanner findings. AI mode keeps triaging additional SAST results in batches until it reaches the active code-finding target or the `--max-ai-findings` cap. True positives move into Code Findings; false positives move into AI False Positives and disappear from Additional SAST.
 - Exploratory source audit: sends a repository manifest first, lets the AI request source files by path, then sends bounded source packs so it can look for vulnerabilities missed by scanners. This is controlled by `--no-ai-audit`, `--max-ai-audit-files`, `--max-ai-audit-rounds`, and `--max-ai-audit-chars`.
 
 Reports default to timestamped files such as `codeguardian-report/report-APP-YYYY-MM-DD-HHMMSS.md`, `.json`, and `.sarif`.
@@ -129,6 +130,8 @@ severityOverrides:
   custom-rules/debug-endpoint: low
 failOn: high
 maxAdditionalSastFindings: 100
+maxAiFindings: 150
+aiTriageTargetCodeFindings: 40
 aiFastModel: deepseek-v4-flash
 aiStrongModel: deepseek-v4-pro
 aiCritic: true
