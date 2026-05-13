@@ -32,18 +32,23 @@ export function createAiProvider(env: AppEnv, overrideProvider?: string, overrid
   return { provider: new OpenRouterProvider(key, model, env.AI_BASE_URL || env.OPENROUTER_BASE_URL), model };
 }
 
-export function aiFastModel(env: AppEnv, provider: string, configModel?: string, cliModel?: string): string | undefined {
+export function aiLowModel(env: AppEnv, configModel?: string, cliModel?: string): string | undefined {
   if (cliModel) return cliModel;
   if (configModel) return configModel;
-  if (env.AI_FAST_MODEL) return env.AI_FAST_MODEL;
-  if (provider === "deepseek") return env.DEEPSEEK_FAST_MODEL || "deepseek-v4-flash";
+  if (env.AI_LOW_MODEL) return env.AI_LOW_MODEL;
   return env.AI_MODEL || undefined;
 }
 
-export function aiStrongModel(env: AppEnv, provider: string, configModel?: string, cliModel?: string): string | undefined {
+export function aiMediumModel(env: AppEnv, configModel?: string, cliModel?: string): string | undefined {
   if (cliModel) return cliModel;
   if (configModel) return configModel;
-  if (env.AI_STRONG_MODEL) return env.AI_STRONG_MODEL;
-  if (provider === "deepseek") return env.DEEPSEEK_STRONG_MODEL || "deepseek-v4-pro";
+  if (env.AI_MEDIUM_MODEL) return env.AI_MEDIUM_MODEL;
+  return env.AI_MODEL || undefined;
+}
+
+export function aiHighModel(env: AppEnv, configModel?: string, cliModel?: string): string | undefined {
+  if (cliModel) return cliModel;
+  if (configModel) return configModel;
+  if (env.AI_HIGH_MODEL) return env.AI_HIGH_MODEL;
   return env.AI_MODEL || undefined;
 }

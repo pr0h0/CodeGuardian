@@ -14,12 +14,18 @@ describe("project config and fingerprints", () => {
       "  - custom-rules/debug-endpoint",
       "severityOverrides:",
       "  custom-rules/js-eval: critical",
+      "aiLowModel: cheap-model",
+      "aiMediumModel: balanced-model",
+      "aiHighModel: hard-model",
       "incremental: true"
     ].join("\n"));
     const config = loadProjectConfig(dir);
     expect(config.profile).toBe("cli");
     expect(config.disabledRules).toContain("custom-rules/debug-endpoint");
     expect(config.severityOverrides["custom-rules/js-eval"]).toBe("critical");
+    expect(config.aiLowModel).toBe("cheap-model");
+    expect(config.aiMediumModel).toBe("balanced-model");
+    expect(config.aiHighModel).toBe("hard-model");
     expect(config.incremental).toBe(true);
   });
 

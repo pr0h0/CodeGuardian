@@ -13,6 +13,32 @@ describe("report", () => {
     expect(fs.existsSync(file)).toBe(true);
   });
 
+  it("renders AI token usage and cost in markdown", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cg-"));
+    const file = writeMarkdownReport(dir, {
+      scan: { id: "1", repo_path: ".", status: "completed", model: "low:cheap / medium:balanced / high:hard" },
+      files: [],
+      findings: [],
+      scannerResults: [],
+      aiBudget: { triagedScannerResults: 2, triageTargetCodeFindings: 1, triageContextChars: 1000, estimatedTriageTokens: 250 },
+      aiUsage: [{
+        tier: "medium",
+        provider: "openrouter",
+        model: "balanced",
+        requests: 2,
+        inputTokens: 1200,
+        outputTokens: 300,
+        totalTokens: 1500,
+        inputCostUsd: 0.001,
+        outputCostUsd: 0.002,
+        costUsd: 0.003
+      }]
+    });
+    const content = fs.readFileSync(file, "utf8");
+    expect(content).toContain("| Tier | Provider | Model | Requests | Input tokens | Output tokens | Total tokens | Input cost USD | Output cost USD | Total cost USD |");
+    expect(content).toContain("| medium | openrouter | balanced | 2 | 1200 | 300 | 1500 | 0.001000 | 0.002000 | 0.003000 |");
+  });
+
   it("escapes html tags in markdown output", () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cg-"));
     const file = writeMarkdownReport(dir, {
@@ -224,6 +250,18 @@ describe("report", () => {
         severity: "medium",
         path: "src/eval.ts",
         start_line: 3
+      }],
+      aiUsage: [{
+        tier: "low",
+        provider: "openai",
+        model: "cheap",
+        requests: 1,
+        inputTokens: 100,
+        outputTokens: 20,
+        totalTokens: 120,
+        inputCostUsd: null,
+        outputCostUsd: null,
+        costUsd: 0.0001
       }]
     });
 
@@ -234,5 +272,7 @@ describe("report", () => {
     expect(content).toContain("id=\"search\"");
     expect(content).toContain("Command injection");
     expect(content).toContain("Additional SAST Findings");
+    expect(content).toContain("AI Usage");
+    expect(content).toContain("0.000100");
   });
 });

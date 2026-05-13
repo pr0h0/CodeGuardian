@@ -9,10 +9,11 @@ import { detectRoutes } from "../repo/routeDetector.js";
 import { extractSymbols } from "../repo/symbolExtractor.js";
 import { lineSlice } from "../utils/lineMap.js";
 import type { AiMessage, AiProvider } from "./types.js";
+import { auditResponseJsonSchema, categoryValues, confidenceValues, severityValues, statusValues } from "./schemas.js";
 
 const auditFindingSchema = z.object({
   title: z.string(),
-  category: z.string(),
+  category: z.enum(categoryValues),
   severity: z.enum(["critical", "high", "medium", "low", "info"]),
   confidence: z.enum(["confirmed", "high", "medium", "low"]),
   status: z.enum(["confirmed", "confirmed_true_positive", "likely_true_positive", "security_hotspot", "needs_context", "suspected", "needs_dynamic_test", "false_positive"]).default("suspected"),
@@ -34,11 +35,11 @@ const auditFindingSchema = z.object({
 
 const auditToolCallSchema = z.object({
   type: z.enum(["read_file", "search_text", "search_symbol", "find_category"]),
-  path: z.string().optional(),
-  query: z.string().optional(),
-  symbol: z.string().optional(),
-  category: z.string().optional(),
-  reason: z.string().optional()
+  path: z.string().default(""),
+  query: z.string().default(""),
+  symbol: z.string().default(""),
+  category: z.string().default(""),
+  reason: z.string().default("")
 });
 
 const auditResponseSchema = z.object({
@@ -154,6 +155,7 @@ async function requestAuditRound(provider: AiProvider, messages: AiMessage[], lo
   const output = await provider.complete({
     system: buildAuditSystemPrompt(),
     messages,
+    jsonSchema: auditResponseJsonSchema,
     temperature: 0,
     maxTokens: 3500
   });
@@ -162,8 +164,9 @@ async function requestAuditRound(provider: AiProvider, messages: AiMessage[], lo
   if (!checked.success) {
     log(`ai-audit: round ${round} invalid JSON/schema, repairing`);
     const repair = await provider.complete({
-      system: "Repair invalid JSON to match this schema exactly: {summary:string, requestedFiles:string[], complete:boolean, findings:array}. Output JSON only.",
+      system: "Repair invalid JSON to match the strict JSON schema exactly. Output raw JSON only. No prose, markdown, comments, code fences, or extra keys. Use only enum values allowed by schema.",
       messages: [{ role: "user", content: output.text }],
+      jsonSchema: auditResponseJsonSchema,
       temperature: 0,
       maxTokens: 2500
     });
@@ -195,7 +198,9 @@ function buildAuditSystemPrompt(): string {
     "Prefer no finding over a weak finding.",
     "Use category rubrics: auth requires missing authorization on reachable sensitive action; SSRF requires user-controlled URL reaching outbound request without allowlist; path traversal requires user path reaching filesystem without normalization/base check; command injection requires user input reaching shell command; XSS requires untrusted HTML/script reaching render sink without escaping; template/RCE chains require a plausible pollution/input vector plus vulnerable render/eval behavior; secrets require literal committed secret value, not runtime env reference; crypto requires weak primitive or unsafe key/IV usage; CSRF/CORS requires browser-reachable state change or credential exposure.",
     "Focus on auth/authz, tenant isolation, injection, XSS, SSRF, path traversal, file upload, crypto misuse, webhooks, CORS/CSRF/session bugs, secrets, unsafe redirects, unsafe dynamic execution.",
-    "Return one JSON object only: {summary, requestedFiles, toolCalls, complete, findings}. findings must include title, category, severity, confidence, status, path, startLine, endLine, source, sourceLine, sink, sinkLine, dataFlow, missingControl, exploitPreconditions, safeRepro, evidence, reasoning, remediation."
+    "Return raw JSON object only: {summary, requestedFiles, toolCalls, complete, findings}. No prose, markdown, code fences, comments, or extra keys.",
+    "Use only enum values listed in the schema. Do not invent categories, severities, confidences, statuses, tool types, or field names.",
+    "findings must include title, category, severity, confidence, status, path, startLine, endLine, source, sourceLine, sink, sinkLine, dataFlow, missingControl, exploitPreconditions, safeRepro, evidence, reasoning, remediation."
   ].join("\n");
 }
 
@@ -228,24 +233,24 @@ ${memory.notes.slice(-40).map((item) => `- ${item.path}: ${item.note}`).join("\n
 Source pack:
 ${JSON.stringify(pack, null, 2)}
 
-Return JSON only:
+Return raw JSON only. No prose, markdown fences, comments, or extra keys. Use only predefined enum values:
 {
   "summary": "short summary",
   "requestedFiles": ["exact/path.ts"],
   "toolCalls": [
-    {"type":"read_file","path":"exact/path.ts","reason":"need callee"},
-    {"type":"search_text","query":"dangerousFunction","reason":"find callers"},
-    {"type":"search_symbol","symbol":"handlerName","reason":"find definition"},
-    {"type":"find_category","category":"ssrf","reason":"find outbound sinks"}
+    {"type":"read_file","path":"exact/path.ts","query":"","symbol":"","category":"","reason":"need callee"},
+    {"type":"search_text","path":"","query":"dangerousFunction","symbol":"","category":"","reason":"find callers"},
+    {"type":"search_symbol","path":"","query":"","symbol":"handlerName","category":"","reason":"find definition"},
+    {"type":"find_category","path":"","query":"","symbol":"","category":"ssrf","reason":"find outbound sinks"}
   ],
   "complete": false,
   "findings": [
     {
       "title": "finding title",
-      "category": "auth | ssrf | xss | injection | secrets | weak-crypto | ...",
-      "severity": "critical | high | medium | low | info",
-      "confidence": "confirmed | high | medium | low",
-      "status": "confirmed | confirmed_true_positive | likely_true_positive | security_hotspot | needs_context | suspected | needs_dynamic_test | false_positive",
+      "category": ${JSON.stringify(categoryValues)},
+      "severity": ${JSON.stringify(severityValues)},
+      "confidence": ${JSON.stringify(confidenceValues)},
+      "status": ${JSON.stringify(statusValues)},
       "path": "exact/path.ts",
       "startLine": 1,
       "endLine": 1,

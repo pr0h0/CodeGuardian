@@ -89,10 +89,13 @@ DeepSeek:
 ```env
 AI_PROVIDER=deepseek
 DEEPSEEK_API_KEY=...
-DEEPSEEK_FAST_MODEL=deepseek-v4-flash
-DEEPSEEK_STRONG_MODEL=deepseek-v4-pro
+AI_LOW_MODEL=deepseek-v4-flash
+AI_MEDIUM_MODEL=deepseek-chat
+AI_HIGH_MODEL=deepseek-v4-pro
 DEEPSEEK_BASE_URL=https://api.deepseek.com
 ```
+
+AI triage routes straightforward medium-severity scanner findings to the low tier, most high-signal findings to the medium tier, and only complex critical/high candidates such as correlation chains, authz, SSRF, RCE, path traversal, and command injection to the high tier. Each tier uses `AI_LOW_MODEL`, `AI_MEDIUM_MODEL`, or `AI_HIGH_MODEL` when set, otherwise it falls back to `AI_MODEL`. Reports include per-tier/per-model request count, input tokens, output tokens, total tokens, and USD cost when the provider response includes cost fields.
 
 OpenRouter:
 
@@ -133,8 +136,9 @@ failOn: high
 maxAdditionalSastFindings: 100
 maxAiFindings: 150
 aiTriageTargetCodeFindings: 40
-aiFastModel: deepseek-v4-flash
-aiStrongModel: deepseek-v4-pro
+aiLowModel: deepseek-v4-flash
+aiMediumModel: deepseek-chat
+aiHighModel: deepseek-v4-pro
 aiCritic: true
 incremental: true
 ```

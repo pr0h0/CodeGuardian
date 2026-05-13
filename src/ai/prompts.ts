@@ -1,4 +1,5 @@
 import type { ContextPack } from "../repo/contextPackBuilder.js";
+import { categoryValues, confidenceValues, severityValues, statusValues } from "./schemas.js";
 
 export function buildSecurityTriageSystemPrompt(): string {
   return [
@@ -12,7 +13,8 @@ export function buildSecurityTriageSystemPrompt(): string {
     "Consider scannerNegatives as weak signals only: they may help avoid repeating unsupported issues, but they do not prove safety.",
     "If source line, sink line, and missing control are not supported by supplied context, lower confidence or mark false_positive.",
     "If one extra file or function is needed to decide, request it with requestedFiles or requestedSymbols. After requestedContext is supplied, make a final decision and do not ask again.",
-    "Return one JSON object only. Do not wrap it in finding/result/findings.",
+    "Return raw JSON object only. No prose, markdown, code fences, comments, explanations, or wrapper keys such as finding/result/findings.",
+    "Use only enum values explicitly listed in the schema. Do not invent categories, severities, confidences, statuses, risks, or field names.",
     "All required keys must exist even when isFinding is false.",
     "Never output real secrets. Redact values."
   ].join("\n");
@@ -26,14 +28,14 @@ ${JSON.stringify(contextPack, null, 2)}
 
 Repository AI instructions, if present, are included inside inputs.aiInstructions. Use them to avoid known false positives such as framework-controlled domains, trusted post-auth invariants, test fixtures, or intentionally accepted local-dev behavior.
 
-Required output schema, with every key present:
+Required strict JSON schema shape, with every key present and no extra keys:
 {
   "isFinding": true,
   "title": "short finding title",
-  "category": "secrets | sql-injection | xss | dependency | weak-crypto | auth | ...",
-  "severity": "critical | high | medium | low | info",
-  "confidence": "confirmed | high | medium | low",
-  "status": "confirmed | confirmed_true_positive | likely_true_positive | security_hotspot | needs_context | suspected | needs_dynamic_test | false_positive",
+  "category": ${JSON.stringify(categoryValues)},
+  "severity": ${JSON.stringify(severityValues)},
+  "confidence": ${JSON.stringify(confidenceValues)},
+  "status": ${JSON.stringify(statusValues)},
   "affectedLocations": [{"path": "path from input", "startLine": 1, "endLine": 1}],
   "source": "scanner or source description",
   "sourceLine": 1,
@@ -55,6 +57,9 @@ Required output schema, with every key present:
 }
 
 Rules:
+- Output raw JSON only. No prose, no markdown fences, no comments.
+- Use only predefined enum values shown above.
+- Do not add keys outside the schema.
 - Evidence must cite exact supplied path and line.
 - If sanitizer, allowlist, auth guard, test-only path, or dependency-only code disproves exploitability, return isFinding=false.
 - If another file/function is needed before deciding, populate requestedFiles/requestedSymbols. Use exact paths or symbol/function names. Keep isFinding=false and status="needs_dynamic_test" for that provisional response.
@@ -68,8 +73,9 @@ export function buildSecurityCriticSystemPrompt(): string {
     "Role: skeptical security reviewer.",
     "Goal: disprove or downgrade one proposed finding using only supplied scanner context and finding JSON.",
     "Look for sanitizers, auth guards, allowlists, test/dev-only paths, dependency-only code, unreachable code, or missing source-to-sink evidence.",
-    "Return JSON only: {verdict, confidence, reasons, revisedStatus, revisedConfidence}.",
-    "verdict must be keep, downgrade, or reject."
+    "Return raw JSON only: {verdict, confidence, reasons, revisedStatus, revisedConfidence}.",
+    "No prose, markdown, code fences, comments, or extra keys.",
+    "Use only enum values listed in the schema."
   ].join("\n");
 }
 
@@ -82,11 +88,11 @@ ${JSON.stringify(finding, null, 2)}
 
 Critic JSON schema:
 {
-  "verdict": "keep | downgrade | reject",
-  "confidence": "high | medium | low",
+  "verdict": ["keep", "downgrade", "reject"],
+  "confidence": ["high", "medium", "low"],
   "reasons": ["specific reason"],
-  "revisedStatus": "confirmed | confirmed_true_positive | likely_true_positive | security_hotspot | needs_context | suspected | needs_dynamic_test | false_positive",
-  "revisedConfidence": "confirmed | high | medium | low"
+  "revisedStatus": ${JSON.stringify(statusValues)},
+  "revisedConfidence": ${JSON.stringify(confidenceValues)}
 }`;
 }
 

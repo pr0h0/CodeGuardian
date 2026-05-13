@@ -61,6 +61,7 @@ export function writeMarkdownReport(outDir: string, bundle: any, warnings: strin
     ], false),
     ...renderSection("AI Budget", [
       ...renderAiBudget(bundle.aiBudget),
+      ...renderAiUsage(bundle.aiUsage),
       `- AI models: ${escapeHtml(bundle.scan?.model ?? "none")}`,
       `- AI instructions: ${bundle.aiInstructions?.loaded ? `${escapeHtml(bundle.aiInstructions.path)} (${bundle.aiInstructions.chars} chars)` : "not supplied"}`
     ], false),
@@ -146,6 +147,41 @@ function renderAiBudget(budget?: Row): string[] {
     `- Triage context chars: ${budget.triageContextChars ?? 0}`,
     `- Estimated triage tokens: ${budget.estimatedTriageTokens ?? 0}`
   ];
+}
+
+function renderAiUsage(rows?: Row[]): string[] {
+  if (!Array.isArray(rows) || !rows.length) return ["- Token usage: not reported by provider."];
+  const lines = [
+    "",
+    "| Tier | Provider | Model | Requests | Input tokens | Output tokens | Total tokens | Input cost USD | Output cost USD | Total cost USD |",
+    "|---|---|---|---:|---:|---:|---:|---:|---:|---:|"
+  ];
+  for (const row of rows) {
+    lines.push([
+      tableCell(row.tier),
+      tableCell(row.provider),
+      tableCell(row.model),
+      formatInteger(row.requests),
+      formatInteger(row.inputTokens),
+      formatInteger(row.outputTokens),
+      formatInteger(row.totalTokens),
+      formatCost(row.inputCostUsd),
+      formatCost(row.outputCostUsd),
+      formatCost(row.costUsd)
+    ].join(" | ").replace(/^/, "| ").replace(/$/, " |"));
+  }
+  return lines;
+}
+
+function formatInteger(value: unknown): string {
+  const number = Number(value ?? 0);
+  return Number.isFinite(number) ? String(Math.round(number)) : "0";
+}
+
+function formatCost(value: unknown): string {
+  if (value === null || value === undefined || value === "") return "not reported";
+  const number = Number(value);
+  return Number.isFinite(number) ? number.toFixed(6) : "not reported";
 }
 
 function renderTopFixes(findings: Row[], dependencies: DependencyFinding[]): string[] {

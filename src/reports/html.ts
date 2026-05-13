@@ -27,6 +27,7 @@ export function writeHtmlReport(outDir: string, bundle: any, warnings: string[] 
     additionalSast,
     scanner,
     files: bundle.files ?? [],
+    aiUsage: bundle.aiUsage ?? [],
     warnings
   });
   const file = path.join(outDir, `${reportBase}.html`);
@@ -45,9 +46,11 @@ function renderDocument(input: {
   additionalSast: Row[];
   scanner: Row[];
   files: Row[];
+  aiUsage: Row[];
   warnings: string[];
 }): string {
   const severityCounts = countBy(input.activeFindings, "severity");
+  const aiRequests = input.aiUsage.reduce((sum, row) => sum + Number(row.requests ?? 0), 0);
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -107,6 +110,7 @@ function renderDocument(input: {
       ${metric("Compliance", input.compliance.length)}
       ${metric("False Positives", input.falsePositives.length)}
       ${metric("Indexed Files", input.files.filter((file) => file.indexed).length)}
+      ${metric("AI Requests", aiRequests)}
     </div>
     ${section("Fix First", renderFixFirst(input.activeFindings), true)}
     ${section("Attack Chains", renderAttackChainTable(input.attackChains), true)}
@@ -116,6 +120,7 @@ function renderDocument(input: {
     ${section("Compliance Evidence", renderComplianceTable(input.compliance), false)}
     ${section("AI False Positives", renderFindings(input.repoPath, input.falsePositives), false)}
     ${section("Scanner Counts", renderScannerCounts(input.scanner), false)}
+    ${section("AI Usage", renderAiUsageTable(input.aiUsage), false)}
     ${section("Warnings", input.warnings.length ? `<ul>${input.warnings.map((w) => `<li>${esc(w)}</li>`).join("")}</ul>` : "<p>None</p>", false)}
   </main>
   <script>
@@ -243,6 +248,22 @@ function renderAttackChainTable(rows: Row[]): string {
 function renderScannerCounts(rows: Row[]): string {
   const counts = countBy(rows, "scanner");
   return `<table><thead><tr><th>Scanner</th><th>Count</th></tr></thead><tbody>${Object.entries(counts).map(([name, count]) => `<tr><td>${esc(name)}</td><td>${count}</td></tr>`).join("")}</tbody></table>`;
+}
+
+function renderAiUsageTable(rows: Row[]): string {
+  if (!rows.length) return "<p>Token usage was not reported by the provider.</p>";
+  return `<table><thead><tr><th>Tier</th><th>Provider</th><th>Model</th><th>Requests</th><th>Input tokens</th><th>Output tokens</th><th>Total tokens</th><th>Input cost USD</th><th>Output cost USD</th><th>Total cost USD</th></tr></thead><tbody>${rows.map((item) => `<tr data-row><td>${esc(item.tier)}</td><td>${esc(item.provider)}</td><td>${esc(item.model)}</td><td>${esc(formatInteger(item.requests))}</td><td>${esc(formatInteger(item.inputTokens))}</td><td>${esc(formatInteger(item.outputTokens))}</td><td>${esc(formatInteger(item.totalTokens))}</td><td>${esc(formatCost(item.inputCostUsd))}</td><td>${esc(formatCost(item.outputCostUsd))}</td><td>${esc(formatCost(item.costUsd))}</td></tr>`).join("")}</tbody></table>`;
+}
+
+function formatInteger(value: unknown): string {
+  const number = Number(value ?? 0);
+  return Number.isFinite(number) ? String(Math.round(number)) : "0";
+}
+
+function formatCost(value: unknown): string {
+  if (value === null || value === undefined || value === "") return "not reported";
+  const number = Number(value);
+  return Number.isFinite(number) ? number.toFixed(6) : "not reported";
 }
 
 function row(item: Row, cells: unknown[]): string {

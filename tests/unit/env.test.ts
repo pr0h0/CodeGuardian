@@ -12,7 +12,8 @@ describe("env", () => {
     expect(env.CODEGUARDIAN_AI_AUDIT_MAX_FILES).toBe(1000);
     expect(env.CODEGUARDIAN_AI_AUDIT_MAX_ROUNDS).toBe(200);
     expect(env.CODEGUARDIAN_AI_AUDIT_MAX_CHARS).toBe(4000000);
-    expect(env.DEEPSEEK_FAST_MODEL).toBe("deepseek-v4-flash");
-    expect(env.DEEPSEEK_STRONG_MODEL).toBe("deepseek-v4-pro");
+    expect(env.AI_LOW_MODEL).toBe("");
+    expect(env.AI_MEDIUM_MODEL).toBe("");
+    expect(env.AI_HIGH_MODEL).toBe("");
   });
 });

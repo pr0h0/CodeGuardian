@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { categoryValues } from "./schemas.js";
 
 export interface AiMessage { role: "user" | "assistant"; content: string }
 export interface AiCompletionInput {
@@ -14,7 +15,7 @@ export interface AiProvider { name: string; complete(input: AiCompletionInput): 
 export const aiFindingSchema = z.object({
   isFinding: z.boolean(),
   title: z.string(),
-  category: z.string(),
+  category: z.enum(categoryValues),
   severity: z.enum(["critical", "high", "medium", "low", "info"]),
   confidence: z.enum(["confirmed", "high", "medium", "low"]),
   status: z.enum(["confirmed", "confirmed_true_positive", "likely_true_positive", "security_hotspot", "needs_context", "suspected", "needs_dynamic_test", "false_positive"]),

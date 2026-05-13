@@ -1,16 +1,32 @@
 import { describe, expect, it } from "vitest";
 import { buildOpenAiResponseParams, supportsTemperature } from "../../src/ai/openai.js";
-import { aiFastModel, aiStrongModel, createAiProvider } from "../../src/ai/provider.js";
+import { aiHighModel, aiLowModel, aiMediumModel, createAiProvider } from "../../src/ai/provider.js";
+import { aiFindingJsonSchema } from "../../src/ai/schemas.js";
 import { loadEnv } from "../../src/config/env.js";
 
 describe("provider config", () => {
   it("fails clearly without key", () => {
     expect(() => createAiProvider(loadEnv({ AI_PROVIDER: "openai" }))).toThrow(/requires/);
   });
-  it("selects DeepSeek fast and strong defaults", () => {
-    const env = loadEnv({ AI_PROVIDER: "deepseek", DEEPSEEK_API_KEY: "x" });
-    expect(aiFastModel(env, "deepseek")).toBe("deepseek-v4-flash");
-    expect(aiStrongModel(env, "deepseek")).toBe("deepseek-v4-pro");
+  it("falls tier models back to AI_MODEL", () => {
+    const env = loadEnv({ AI_PROVIDER: "deepseek", DEEPSEEK_API_KEY: "x", AI_MODEL: "shared-model" });
+    expect(aiLowModel(env)).toBe("shared-model");
+    expect(aiMediumModel(env)).toBe("shared-model");
+    expect(aiHighModel(env)).toBe("shared-model");
+  });
+
+  it("uses explicit low, medium, and high tier models before AI_MODEL", () => {
+    const env = loadEnv({
+      AI_PROVIDER: "deepseek",
+      DEEPSEEK_API_KEY: "x",
+      AI_MODEL: "shared-model",
+      AI_LOW_MODEL: "cheap-model",
+      AI_MEDIUM_MODEL: "balanced-model",
+      AI_HIGH_MODEL: "hard-model"
+    });
+    expect(aiLowModel(env)).toBe("cheap-model");
+    expect(aiMediumModel(env)).toBe("balanced-model");
+    expect(aiHighModel(env)).toBe("hard-model");
   });
 
   it("omits temperature for OpenAI models that reject it", () => {
@@ -26,5 +42,20 @@ describe("provider config", () => {
       maxTokens: 100
     });
     expect(params).not.toHaveProperty("temperature");
+  });
+
+  it("passes strict JSON schema to OpenAI responses", () => {
+    const params = buildOpenAiResponseParams("gpt-4.1-mini", {
+      system: "system",
+      messages: [{ role: "user", content: "hi" }],
+      jsonSchema: aiFindingJsonSchema,
+      temperature: 0,
+      maxTokens: 100
+    });
+    expect(params.text?.format).toMatchObject({
+      type: "json_schema",
+      name: "security_triage_finding",
+      strict: true
+    });
   });
 });

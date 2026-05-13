@@ -8,9 +8,12 @@ export class AnthropicProvider implements AiProvider {
     this.client = new Anthropic({ apiKey, timeout: 120_000, maxRetries: 1 });
   }
   async complete(input: AiCompletionInput): Promise<AiCompletionOutput> {
+    const system = input.jsonSchema
+      ? `${input.system}\n\nReturn raw JSON only. No prose, markdown, comments, or code fences. Strict JSON schema:\n${JSON.stringify(input.jsonSchema)}`
+      : input.system;
     const response = await this.client.messages.create({
       model: this.model,
-      system: input.system,
+      system,
       messages: input.messages,
       temperature: input.temperature ?? 0,
       max_tokens: input.maxTokens ?? 2000

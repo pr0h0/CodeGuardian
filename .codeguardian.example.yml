@@ -9,7 +9,8 @@ maxAiFindings: 25
 maxAiAuditFiles: 40
 maxAiAuditRounds: 6
 maxAiAuditChars: 160000
-aiFastModel: deepseek-v4-flash
-aiStrongModel: deepseek-v4-pro
+aiLowModel: deepseek-v4-flash
+aiMediumModel: deepseek-chat
+aiHighModel: deepseek-v4-pro
 aiCritic: true
 incremental: false

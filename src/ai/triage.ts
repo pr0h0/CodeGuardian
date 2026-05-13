@@ -3,6 +3,7 @@ import type { Finding, ScannerResult } from "../scanners/types.js";
 import { safeJsonParse } from "../utils/safeJson.js";
 import { aiFindingSchema, type AiProvider } from "./types.js";
 import { buildSecurityCriticSystemPrompt, buildSecurityCriticUserPrompt, buildSecurityTriageSystemPrompt, buildSecurityTriageUserPrompt } from "./prompts.js";
+import { aiFindingJsonSchema, criticJsonSchema } from "./schemas.js";
 import { z } from "zod";
 
 const criticSchema = z.object({
@@ -53,15 +54,24 @@ function summarize(value: string, max: number): string {
     .slice(0, max);
 }
 
-export async function aiTriage(provider: AiProvider, packs: ContextPack[], log: (message: string) => void = () => undefined, criticProvider?: AiProvider, resolveRequestedContext?: RequestedContextResolver): Promise<Finding[]> {
+export async function aiTriage(
+  provider: AiProvider,
+  packs: ContextPack[],
+  log: (message: string) => void = () => undefined,
+  criticProvider?: AiProvider,
+  resolveRequestedContext?: RequestedContextResolver,
+  labels?: string[],
+  repairProvider?: AiProvider
+): Promise<Finding[]> {
   const findings: Finding[] = [];
   for (const [index, pack] of packs.entries()) {
-    const label = `${index + 1}/${packs.length} ${pack.scannerResult.scanner}/${pack.scannerResult.ruleId} ${pack.scannerResult.path ?? ""}:${pack.scannerResult.startLine ?? ""}`;
+    const label = labels?.[index] ?? `${index + 1}/${packs.length} ${pack.scannerResult.scanner}/${pack.scannerResult.ruleId} ${pack.scannerResult.path ?? ""}:${pack.scannerResult.startLine ?? ""}`;
     try {
       log(`ai: triage ${label} start`);
       const output = await withTimeout(provider.complete({
         system: buildSecurityTriageSystemPrompt(),
         messages: [{ role: "user", content: buildSecurityTriageUserPrompt(pack) }],
+        jsonSchema: aiFindingJsonSchema,
         temperature: 0,
         maxTokens: 2500
       }), 120_000, "AI triage request timed out after 120s");
@@ -70,7 +80,7 @@ export async function aiTriage(provider: AiProvider, packs: ContextPack[], log: 
       let checked = aiFindingSchema.safeParse(parsed);
       if (!checked.success) {
         log(`ai: triage ${label} schema invalid, repairing`);
-        const repair = await withTimeout(provider.complete({ system: "Repair invalid JSON to match requested schema. Output JSON only.", messages: [{ role: "user", content: output.text }], temperature: 0, maxTokens: 2500 }), 120_000, "AI JSON repair request timed out after 120s");
+        const repair = await withTimeout((repairProvider ?? provider).complete({ system: "Repair invalid JSON to match requested schema. Output raw JSON only. No prose, markdown, comments, code fences, or extra keys. Use only enum values allowed by schema.", messages: [{ role: "user", content: output.text }], jsonSchema: aiFindingJsonSchema, temperature: 0, maxTokens: 2500 }), 120_000, "AI JSON repair request timed out after 120s");
         log(`ai: triage ${label} repair response chars=${repair.text.length}`);
         parsed = normalizeAiFindingJson(safeJsonParse(repair.text));
         checked = aiFindingSchema.safeParse(parsed);
@@ -88,6 +98,7 @@ export async function aiTriage(provider: AiProvider, packs: ContextPack[], log: 
             const retry = await withTimeout(provider.complete({
               system: buildSecurityTriageSystemPrompt(),
               messages: [{ role: "user", content: `${buildSecurityTriageUserPrompt(expandedPack)}\n\nYou already requested extra context and it is now present in inputs.requestedContext. Make the final decision now. Do not request more context.` }],
+              jsonSchema: aiFindingJsonSchema,
               temperature: 0,
               maxTokens: 3000
             }), 120_000, "AI triage context expansion request timed out after 120s");
@@ -134,6 +145,7 @@ async function applyCritic(provider: AiProvider, pack: ContextPack, data: z.infe
   const output = await withTimeout(provider.complete({
     system: buildSecurityCriticSystemPrompt(),
     messages: [{ role: "user", content: buildSecurityCriticUserPrompt(pack, data) }],
+    jsonSchema: criticJsonSchema,
     temperature: 0,
     maxTokens: 1200
   }), 120_000, "AI critic request timed out after 120s");

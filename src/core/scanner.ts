@@ -18,8 +18,9 @@ import { runCorrelationChecks } from "../scanners/correlations.js";
 import { applySuppressions } from "../scanners/suppressions.js";
 import { deterministicFinding, aiTriage } from "../ai/triage.js";
 import { runExploratoryAudit } from "../ai/audit.js";
-import { aiFastModel, aiStrongModel, createAiProvider } from "../ai/provider.js";
+import { aiHighModel, aiLowModel, aiMediumModel, createAiProvider } from "../ai/provider.js";
 import type { AiProvider } from "../ai/types.js";
+import { AiUsageTracker, type AiTier, withUsageTracking } from "../ai/usage.js";
 import { buildContextPack } from "../repo/contextPackBuilder.js";
 import { loadAiInstructions } from "../repo/aiInstructions.js";
 import type { IndexedFile } from "../repo/repoIndexer.js";
@@ -34,29 +35,37 @@ import { checkTool } from "../tools/commandRunner.js";
 import { buildBaselineDiff } from "./baseline.js";
 import { attachFindingFingerprints, attachScannerFingerprints } from "./fingerprint.js";
 import { ruleAllowedByProfile } from "../config/projectConfig.js";
-import { planAiTriageCandidates } from "./triagePlanner.js";
+import { planAiTriageCandidates, scoreScannerResult } from "./triagePlanner.js";
 import { scannerImages } from "../scanners/dockerFallback.js";
 import type { ScannerResult, Finding } from "../scanners/types.js";
 import { sha256 } from "../utils/hashing.js";
 import { lineSlice } from "../utils/lineMap.js";
 import { redactSecrets } from "../utils/redact.js";
 
+type AiProviderSet = Record<AiTier, AiProvider> & { critic?: AiProvider };
+
 export async function runScan(ctx: RunContext): Promise<{ scanId: string; reportFiles: string[]; warnings: string[]; exitCode: number }> {
   const db = openDatabase(path.resolve(ctx.repoPath, ctx.env.CODEGUARDIAN_DB_PATH || DEFAULT_DB_PATH));
   let aiMeta: { provider?: string; model?: string } = {};
-  let aiProvider;
-  let criticProvider;
+  let aiProviders: AiProviderSet | undefined;
+  const aiUsageTracker = new AiUsageTracker();
   if (ctx.options.ai) {
     ctx.logger.info("ai: loading provider config");
     const providerName = ctx.options.provider ?? ctx.env.AI_PROVIDER;
-    const fastModel = aiFastModel(ctx.env, providerName, ctx.projectConfig.aiFastModel, ctx.options.model);
-    const strongModel = aiStrongModel(ctx.env, providerName, ctx.projectConfig.aiStrongModel, ctx.options.model);
-    const created = createAiProvider(ctx.env, ctx.options.provider, fastModel);
-    aiProvider = created.provider;
-    const critic = ctx.projectConfig.aiCritic === false ? undefined : createAiProvider(ctx.env, ctx.options.provider, strongModel);
-    criticProvider = critic?.provider;
-    aiMeta = { provider: created.provider.name, model: `${created.model}${critic ? ` / critic:${critic.model}` : ""}` };
-    ctx.logger.info(`ai: provider=${aiMeta.provider} fast=${created.model}${critic ? ` strong=${critic.model}` : ""}`);
+    const lowModel = aiLowModel(ctx.env, ctx.projectConfig.aiLowModel, ctx.options.model);
+    const mediumModel = aiMediumModel(ctx.env, ctx.projectConfig.aiMediumModel, ctx.options.model);
+    const highModel = aiHighModel(ctx.env, ctx.projectConfig.aiHighModel, ctx.options.model);
+    const low = createAiProvider(ctx.env, ctx.options.provider, lowModel);
+    const medium = createAiProvider(ctx.env, ctx.options.provider, mediumModel);
+    const high = createAiProvider(ctx.env, ctx.options.provider, highModel);
+    aiProviders = {
+      low: withUsageTracking(low.provider, aiUsageTracker, "low", low.model),
+      medium: withUsageTracking(medium.provider, aiUsageTracker, "medium", medium.model),
+      high: withUsageTracking(high.provider, aiUsageTracker, "high", high.model),
+      critic: ctx.projectConfig.aiCritic === false ? undefined : withUsageTracking(medium.provider, aiUsageTracker, "medium", medium.model)
+    };
+    aiMeta = { provider: low.provider.name, model: `low:${low.model} / medium:${medium.model} / high:${high.model}${ctx.projectConfig.aiCritic === false ? " / critic:disabled" : " / critic:medium"}` };
+    ctx.logger.info(`ai: provider=${aiMeta.provider} low=${low.model} medium=${medium.model} high=${high.model}${ctx.projectConfig.aiCritic === false ? " critic=disabled" : " critic=medium"}`);
   }
   ctx.logger.info("db: opening scan database");
   const scanId = createScan(db, ctx.repoPath, ctx.options, aiMeta.provider, aiMeta.model);
@@ -139,10 +148,9 @@ export async function runScan(ctx: RunContext): Promise<{ scanId: string; report
     const targetActiveFindings = Math.min(ctx.options.aiTriageTargetCodeFindings, ctx.options.maxAiFindings);
     ctx.logger.info(`triage: planned ${triageCandidates.length} AI scanner candidates max=${ctx.options.maxAiFindings} targetActive=${targetActiveFindings}`);
     const aiBudget = { triageContextChars: 0, estimatedTriageTokens: 0, triagedScannerResults: 0, triageTargetCodeFindings: targetActiveFindings };
-    const findings = aiProvider
+    const findings = aiProviders
       ? await runAiTriageBatches({
-        provider: aiProvider,
-        criticProvider,
+        providers: aiProviders,
         candidates: triageCandidates,
         files,
         scannerResults,
@@ -155,9 +163,9 @@ export async function runScan(ctx: RunContext): Promise<{ scanId: string; report
       : scannerResults.filter((result) => result.scanner !== "compliance").map(deterministicFinding);
     aiBudget.estimatedTriageTokens = Math.ceil(aiBudget.triageContextChars / 4);
     if (aiBudget.triagedScannerResults) ctx.logger.info(`ai-budget: triaged=${aiBudget.triagedScannerResults} context chars=${aiBudget.triageContextChars} estimatedTokens=${aiBudget.estimatedTriageTokens}`);
-    if (aiProvider && ctx.options.aiAudit) {
+    if (aiProviders && ctx.options.aiAudit) {
       ctx.logger.info(`ai-audit: enabled maxFiles=${ctx.options.maxAiAuditFiles} maxRounds=${ctx.options.maxAiAuditRounds} maxChars=${ctx.options.maxAiAuditChars}`);
-      const auditFindings = await runExploratoryAudit(criticProvider ?? aiProvider, files, scannerResults, {
+      const auditFindings = await runExploratoryAudit(aiProviders.medium, files, scannerResults, {
         maxFiles: ctx.options.maxAiAuditFiles,
         maxRounds: ctx.options.maxAiAuditRounds,
         maxChars: ctx.options.maxAiAuditChars,
@@ -165,7 +173,7 @@ export async function runScan(ctx: RunContext): Promise<{ scanId: string; report
       }, (message) => ctx.logger.info(message));
       findings.push(...auditFindings);
       ctx.logger.info(`ai-audit: added ${auditFindings.length} findings`);
-    } else if (aiProvider) {
+    } else if (aiProviders) {
       ctx.logger.info("ai-audit: disabled");
     }
     const finalFindings = applyTriageMemory(db, ctx.repoPath, scanId, attachFindingFingerprints(findings.map(classifyFindingState))).map((finding) => ({ ...finding, exploitabilityScore: localExploitabilityScore(finding) }));
@@ -175,7 +183,7 @@ export async function runScan(ctx: RunContext): Promise<{ scanId: string; report
     ctx.logger.info("db: marking scan completed");
     finishScan(db, scanId, "completed");
     const baselineDiff = buildBaselineDiff(db, ctx.repoPath, scanId, ctx.options.baseline);
-    const bundle = { ...getScanBundle(db, scanId), toolStatuses, baselineDiff, suppressions: suppressed.summary, aiBudget, aiInstructions: { path: aiInstructions.path, chars: aiInstructions.chars, loaded: Boolean(aiInstructions.path) }, projectConfig: ctx.projectConfig, incremental: { enabled: ctx.options.incremental, changedFiles: changedPaths.size, localScannerFiles: localFiles.length } };
+    const bundle = { ...getScanBundle(db, scanId), toolStatuses, baselineDiff, suppressions: suppressed.summary, aiBudget, aiUsage: aiUsageTracker.summary(), aiInstructions: { path: aiInstructions.path, chars: aiInstructions.chars, loaded: Boolean(aiInstructions.path) }, projectConfig: ctx.projectConfig, incremental: { enabled: ctx.options.incremental, changedFiles: changedPaths.size, localScannerFiles: localFiles.length } };
     ctx.logger.info(`reports: writing format=${ctx.options.format} out=${ctx.outDir}`);
     const reportFiles = writeReports(ctx.outDir, ctx.options.format, bundle, warnings);
     for (const file of reportFiles) ctx.logger.info(`reports: wrote ${file}`);
@@ -213,8 +221,7 @@ function createRequestedContextResolver(files: Array<{ path: string; content: st
 }
 
 async function runAiTriageBatches(input: {
-  provider: AiProvider;
-  criticProvider?: AiProvider;
+  providers: AiProviderSet;
   candidates: ScannerResult[];
   files: IndexedFile[];
   scannerResults: ScannerResult[];
@@ -230,19 +237,44 @@ async function runAiTriageBatches(input: {
   for (let offset = 0; offset < input.candidates.length; offset += batchSize) {
     const batch = input.candidates.slice(offset, offset + batchSize);
     input.log(`triage: auditing scanner batch ${Math.floor(offset / batchSize) + 1} results=${batch.length} active=${activeFindingCount(findings)}/${input.targetActiveFindings}`);
-    const contextPacks = batch.map((result, index) => {
+    for (const [index, result] of batch.entries()) {
+      if (input.targetActiveFindings > 0 && activeFindingCount(findings) >= input.targetActiveFindings) break;
+      const absoluteIndex = offset + index;
       input.log(`context: pack ${offset + index + 1}/${input.candidates.length} ${result.scanner}/${result.ruleId} ${result.path ?? ""}:${result.startLine ?? ""}`);
-      return buildContextPack(result, input.files, input.scannerResults, input.maxContextChars, input.aiInstructions);
-    });
-    input.aiBudget.triageContextChars += contextPacks.reduce((sum, pack) => sum + JSON.stringify(pack).length, 0);
-    input.aiBudget.triagedScannerResults += contextPacks.length;
-    findings.push(...await aiTriage(input.provider, contextPacks, input.log, input.criticProvider, resolveRequestedContext));
+      const contextPack = buildContextPack(result, input.files, input.scannerResults, input.maxContextChars, input.aiInstructions);
+      input.aiBudget.triageContextChars += JSON.stringify(contextPack).length;
+      input.aiBudget.triagedScannerResults += 1;
+      const tier = selectAiTriageTier(result);
+      input.log(`triage: model tier=${tier} score=${scoreScannerResult(result)} ${result.scanner}/${result.ruleId} ${result.path ?? ""}:${result.startLine ?? ""}`);
+      findings.push(...await aiTriage(
+        input.providers[tier],
+        [contextPack],
+        input.log,
+        input.providers.critic,
+        resolveRequestedContext,
+        [formatTriageLabel(result, absoluteIndex, input.candidates.length)],
+        input.providers.low
+      ));
+    }
     if (input.targetActiveFindings > 0 && activeFindingCount(findings) >= input.targetActiveFindings) {
       input.log(`triage: target active code findings reached ${activeFindingCount(findings)}/${input.targetActiveFindings}`);
       break;
     }
   }
   return findings;
+}
+
+export function selectAiTriageTier(result: ScannerResult): AiTier {
+  const score = scoreScannerResult(result);
+  const text = `${result.scanner} ${result.ruleId} ${result.title} ${result.category ?? ""} ${result.path ?? ""}`.toLowerCase();
+  const complex = /(correlation|taint-flow|auth|authorization|tenant|ssrf|deserialization|prototype|rce|template|command|path-traversal|file-upload|cors|csrf)/.test(text);
+  if (result.scanner === "correlation" || (result.severity === "critical" && complex) || (result.severity === "high" && complex && score >= 105)) return "high";
+  if (result.severity === "critical" || result.severity === "high" || score >= 75) return "medium";
+  return "low";
+}
+
+function formatTriageLabel(result: ScannerResult, index: number, total: number): string {
+  return `${index + 1}/${total} ${result.scanner}/${result.ruleId} ${result.path ?? ""}:${result.startLine ?? ""}`;
 }
 
 function activeFindingCount(findings: Finding[]): number {

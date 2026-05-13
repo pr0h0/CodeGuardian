@@ -1,6 +1,6 @@
 import OpenAI from "openai";
 import type { AiCompletionInput, AiCompletionOutput, AiProvider } from "./types.js";
-import { supportsTemperature } from "./openai.js";
+import { supportsTemperature, toChatJsonSchema } from "./openai.js";
 
 export class OpenAiCompatibleProvider implements AiProvider {
   private client: OpenAI;
@@ -15,7 +15,7 @@ export class OpenAiCompatibleProvider implements AiProvider {
       messages: [{ role: "system", content: input.system }, ...input.messages],
       ...(supportsTemperature(this.model) ? { temperature: input.temperature ?? 0 } : {}),
       max_tokens: input.maxTokens ?? 2000,
-      response_format: { type: "json_object" }
+      response_format: input.jsonSchema ? toChatJsonSchema(input.jsonSchema) : { type: "json_object" }
     });
     const text = response.choices[0]?.message?.content ?? "";
     return { text, raw: response };

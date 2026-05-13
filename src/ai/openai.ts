@@ -1,5 +1,6 @@
 import OpenAI from "openai";
 import type { AiCompletionInput, AiCompletionOutput, AiProvider } from "./types.js";
+import type { AiJsonSchema } from "./schemas.js";
 
 export class OpenAiProvider implements AiProvider {
   name = "openai";
@@ -18,8 +19,33 @@ export function buildOpenAiResponseParams(model: string, input: AiCompletionInpu
   return {
     model,
     input: [{ role: "system", content: input.system }, ...input.messages.map((m) => ({ role: m.role, content: m.content }))],
+    ...(input.jsonSchema ? { text: { format: toResponseJsonSchema(input.jsonSchema) } } : {}),
     ...(supportsTemperature(model) ? { temperature: input.temperature ?? 0 } : {}),
     max_output_tokens: input.maxTokens ?? 2000
+  };
+}
+
+export function toResponseJsonSchema(jsonSchema: unknown): OpenAI.Responses.ResponseFormatTextJSONSchemaConfig {
+  const schema = jsonSchema as AiJsonSchema;
+  return {
+    type: "json_schema",
+    name: schema.name,
+    description: schema.description,
+    schema: schema.schema,
+    strict: true
+  };
+}
+
+export function toChatJsonSchema(jsonSchema: unknown): OpenAI.Chat.ChatCompletionCreateParamsNonStreaming["response_format"] {
+  const schema = jsonSchema as AiJsonSchema;
+  return {
+    type: "json_schema",
+    json_schema: {
+      name: schema.name,
+      description: schema.description,
+      schema: schema.schema,
+      strict: true
+    }
   };
 }
 
