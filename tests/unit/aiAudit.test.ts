@@ -248,4 +248,77 @@ describe("AI exploratory audit", () => {
     expect(provider.calls[1].messages.at(-1)?.content).toContain('"path": "src/exec.ts"');
     expect(provider.calls[1].messages.at(-1)?.content).toContain("dangerousExec");
   });
+
+  it("keeps each audit request under a bounded context budget", async () => {
+    const provider = new FakeProvider({ summary: "done", requestedFiles: [], toolCalls: [], complete: true, findings: [] });
+    const files = Array.from({ length: 220 }, (_, index) => file(
+      `src/routes/route${index}.ts`,
+      "typescript",
+      [
+        "import express from 'express';",
+        "const router = express.Router();",
+        `router.get('/route-${index}', (req, res) => res.json({ id: req.query.id }));`,
+        ...Array.from({ length: 80 }, (__, line) => `export const value${line} = '${"x".repeat(80)}';`)
+      ].join("\n")
+    ));
+
+    await runExploratoryAudit(
+      provider,
+      files,
+      [],
+      { maxFiles: 20, maxRounds: 1, maxChars: 1_000_000 }
+    );
+
+    const requestChars = provider.calls[0].system.length + provider.calls[0].messages.reduce((sum, message) => sum + message.content.length, 0);
+    expect(requestChars).toBeLessThanOrEqual(60_000);
+  });
+
+  it("does not resend prior source packs in later audit rounds", async () => {
+    const provider = new FakeProvider([
+      { summary: "first", requestedFiles: [], toolCalls: [{ type: "read_file", path: "src/second.ts", startLine: 1, endLine: 1, reason: "read exact line" }], complete: false, findings: [] },
+      { summary: "second", requestedFiles: [], toolCalls: [], complete: true, findings: [] }
+    ]);
+
+    await runExploratoryAudit(
+      provider,
+      [
+        file("src/server.ts", "typescript", "app.get('/x', handler);"),
+        file("src/second.ts", "typescript", "export const second = true;")
+      ],
+      [],
+      { maxFiles: 2, maxRounds: 2, maxChars: 20000 }
+    );
+
+    const secondRequest = provider.calls[1].messages.map((message) => message.content).join("\n");
+    expect(secondRequest).toContain('"path": "src/second.ts"');
+    expect(secondRequest).not.toContain("app.get('/x', handler);");
+  });
+
+  it("fulfills read_file tool calls with requested line ranges", async () => {
+    const content = [
+      "app.get('/start', handler);",
+      ...Array.from({ length: 1198 }, (_, index) => `const filler${index} = ${index};`),
+      "app.get('/run', (req, res) => {",
+      "  exec(req.query.cmd);",
+      "});"
+    ].join("\n");
+    const provider = new FakeProvider([
+      { summary: "need range", requestedFiles: [], toolCalls: [{ type: "read_file", path: "src/server.ts", startLine: 1200, endLine: 1201, reason: "inspect exact sink" }], complete: false, findings: [] },
+      { summary: "done", requestedFiles: [], toolCalls: [], complete: true, findings: [] }
+    ]);
+
+    await runExploratoryAudit(
+      provider,
+      [file("src/server.ts", "typescript", content)],
+      [],
+      { maxFiles: 1, maxRounds: 2, maxChars: 20000 }
+    );
+
+    const prompt = provider.calls[1].messages.at(-1)?.content ?? "";
+    expect(prompt).toContain('"startLine": 1200');
+    expect(prompt).toContain('"endLine": 1201');
+    expect(prompt).toContain("1200: app.get('/run'");
+    expect(prompt).toContain("1201:   exec(req.query.cmd);");
+    expect(prompt).not.toContain("1: app.get('/start', handler);");
+  });
 });

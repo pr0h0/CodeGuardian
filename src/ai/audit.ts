@@ -8,8 +8,12 @@ import { extractImports } from "../repo/importGraph.js";
 import { detectRoutes } from "../repo/routeDetector.js";
 import { extractSymbols } from "../repo/symbolExtractor.js";
 import { lineSlice } from "../utils/lineMap.js";
-import type { AiMessage, AiProvider } from "./types.js";
+import type { AiProvider } from "./types.js";
 import { auditResponseJsonSchema, categoryValues, confidenceValues, severityValues, statusValues } from "./schemas.js";
+
+const DEFAULT_AUDIT_REQUEST_CHAR_BUDGET = 60_000;
+const AUDIT_PROMPT_OVERHEAD_CHARS = 12_000;
+const AUDIT_CHUNK_LINES = 180;
 
 const auditFindingSchema = z.object({
   title: z.string(),
@@ -39,6 +43,8 @@ const auditToolCallSchema = z.object({
   query: z.string().default(""),
   symbol: z.string().default(""),
   category: z.string().default(""),
+  startLine: z.number().int().positive().nullable().default(null),
+  endLine: z.number().int().positive().nullable().default(null),
   reason: z.string().default("")
 });
 
@@ -54,6 +60,7 @@ export interface AiExploratoryAuditOptions {
   maxFiles: number;
   maxRounds: number;
   maxChars: number;
+  maxRequestChars?: number;
   aiInstructions?: string;
 }
 
@@ -107,10 +114,12 @@ export async function runExploratoryAudit(
   const traversal = createAuditTraversal(candidates, scannerResults, importGraph, chunks);
   const memory: AuditMemory = { inspectedFiles: new Set(), inspectedRanges: new Map(), notes: [] };
   const findings: Finding[] = [];
+  const requestCharBudget = auditRequestCharBudget(options);
+  const systemPrompt = buildAuditSystemPrompt();
+  const initialPrompt = buildInitialPrompt(manifest, options, Math.max(2_000, Math.floor((requestCharBudget - systemPrompt.length) * 0.32)));
   let remainingChars = options.maxChars;
   let requested = traversal.next(memory, 6, options.maxFiles);
-  const messages: AiMessage[] = [{ role: "user", content: buildInitialPrompt(manifest, options) }];
-  log(`ai-audit: breadth-first initial targets=${requested.length}`);
+  log(`ai-audit: breadth-first initial targets=${requested.length} requestCharBudget=${requestCharBudget}`);
 
   for (let round = 1; round <= options.maxRounds; round++) {
     const targets = normalizeRequestedTargets(requested, allowed, memory, options.maxFiles);
@@ -118,7 +127,7 @@ export async function runExploratoryAudit(
       log(`ai-audit: round ${round}/${options.maxRounds} no new files requested`);
       break;
     }
-    const pack = buildFilePack(targets, allowed, remainingChars, importGraph, memory);
+    const pack = buildBoundedFilePack(targets, allowed, remainingChars, importGraph, memory, systemPrompt.length + initialPrompt.length, requestCharBudget);
     if (!pack.files.length) {
       log(`ai-audit: round ${round}/${options.maxRounds} source char budget exhausted`);
       break;
@@ -131,9 +140,7 @@ export async function runExploratoryAudit(
     traversal.enqueueImports(pack.files.map((file) => file.path));
     remainingChars -= pack.charCount;
     log(`ai-audit: round ${round}/${options.maxRounds} sending chunks=${pack.files.length} inspectedFiles=${memory.inspectedFiles.size}/${options.maxFiles} chars=${pack.charCount} remaining=${remainingChars}`);
-    messages.push({ role: "user", content: buildAuditRoundPrompt(pack, memory) });
-    const parsed = await requestAuditRound(provider, messages, log, round);
-    messages.push({ role: "assistant", content: JSON.stringify(parsed) });
+    const parsed = await requestAuditRound(provider, systemPrompt, initialPrompt, buildAuditRoundPrompt(pack, memory), log, round);
     const validFindings = parsed.findings.filter((finding) => isSupportedAuditFinding(finding, allowed, memory));
     const dropped = parsed.findings.length - validFindings.length;
     if (dropped) log(`ai-audit: round ${round}/${options.maxRounds} dropped unsupported findings=${dropped}`);
@@ -144,17 +151,20 @@ export async function runExploratoryAudit(
     traversal.enqueueTargets(toolTargets);
     requested = traversal.next(memory, 6, options.maxFiles);
     log(`ai-audit: round ${round}/${options.maxRounds} findings=${parsed.findings.length} requested=${requested.length} toolCalls=${parsed.toolCalls.length} complete=${parsed.complete}`);
-    if (memory.inspectedFiles.size >= options.maxFiles || remainingChars <= 0) break;
+    if (remainingChars <= 0) break;
   }
 
   log(`ai-audit: complete inspected=${memory.inspectedFiles.size} findings=${findings.length}`);
   return dedupeFindings(findings);
 }
 
-async function requestAuditRound(provider: AiProvider, messages: AiMessage[], log: (message: string) => void, round: number): Promise<z.infer<typeof auditResponseSchema>> {
+async function requestAuditRound(provider: AiProvider, systemPrompt: string, manifestPrompt: string, roundPrompt: string, log: (message: string) => void, round: number): Promise<z.infer<typeof auditResponseSchema>> {
   const output = await provider.complete({
-    system: buildAuditSystemPrompt(),
-    messages,
+    system: systemPrompt,
+    messages: [
+      { role: "user", content: manifestPrompt },
+      { role: "user", content: roundPrompt }
+    ],
     jsonSchema: auditResponseJsonSchema,
     temperature: 0,
     maxTokens: 3500
@@ -204,7 +214,7 @@ function buildAuditSystemPrompt(): string {
   ].join("\n");
 }
 
-function buildInitialPrompt(manifest: unknown, options: AiExploratoryAuditOptions): string {
+function buildInitialPrompt(manifest: unknown, options: AiExploratoryAuditOptions, manifestCharBudget = 20_000): string {
   return `Repository manifest follows. The scanner will choose deterministic breadth-first entry points first, then local imports, then remaining files. Use this manifest only to understand repository shape and request exact follow-up files when needed.
 
 Caps:
@@ -218,7 +228,7 @@ Repository AI instructions:
 ${options.aiInstructions || "None supplied."}
 
 Manifest:
-${JSON.stringify(manifest, null, 2)}`;
+${formatManifestForPrompt(manifest, manifestCharBudget)}`;
 }
 
 function buildAuditRoundPrompt(pack: unknown, memory: AuditMemory): string {
@@ -238,10 +248,10 @@ Return raw JSON only. No prose, markdown fences, comments, or extra keys. Use on
   "summary": "short summary",
   "requestedFiles": ["exact/path.ts"],
   "toolCalls": [
-    {"type":"read_file","path":"exact/path.ts","query":"","symbol":"","category":"","reason":"need callee"},
-    {"type":"search_text","path":"","query":"dangerousFunction","symbol":"","category":"","reason":"find callers"},
-    {"type":"search_symbol","path":"","query":"","symbol":"handlerName","category":"","reason":"find definition"},
-    {"type":"find_category","path":"","query":"","symbol":"","category":"ssrf","reason":"find outbound sinks"}
+    {"type":"read_file","path":"exact/path.ts","query":"","symbol":"","category":"","startLine":1,"endLine":120,"reason":"need callee line range"},
+    {"type":"search_text","path":"","query":"dangerousFunction","symbol":"","category":"","startLine":null,"endLine":null,"reason":"find callers"},
+    {"type":"search_symbol","path":"","query":"","symbol":"handlerName","category":"","startLine":null,"endLine":null,"reason":"find definition"},
+    {"type":"find_category","path":"","query":"","symbol":"","category":"ssrf","startLine":null,"endLine":null,"reason":"find outbound sinks"}
   ],
   "complete": false,
   "findings": [
@@ -270,6 +280,54 @@ Return raw JSON only. No prose, markdown fences, comments, or extra keys. Use on
 }`;
 }
 
+function auditRequestCharBudget(options: AiExploratoryAuditOptions): number {
+  const configured = options.maxRequestChars ?? DEFAULT_AUDIT_REQUEST_CHAR_BUDGET;
+  return Math.max(12_000, Math.min(options.maxChars, configured));
+}
+
+function formatManifestForPrompt(manifest: unknown, charBudget: number): string {
+  if (!Array.isArray(manifest)) return truncateString(JSON.stringify(manifest, null, 2), charBudget);
+  const entries = manifest as ManifestEntry[];
+  const files: Array<ReturnType<typeof compactManifestEntry>> = [];
+  for (const entry of entries) {
+    const next = [...files, compactManifestEntry(entry)];
+    const candidate = JSON.stringify({ files: next, omittedFiles: entries.length - next.length }, null, 2);
+    if (candidate.length > charBudget && files.length) break;
+    if (candidate.length > charBudget) {
+      files.push(compactManifestEntry(entry, true));
+      break;
+    }
+    files.push(compactManifestEntry(entry));
+  }
+  return JSON.stringify({ files, omittedFiles: Math.max(0, entries.length - files.length) }, null, 2);
+}
+
+function compactManifestEntry(entry: ManifestEntry, minimal = false) {
+  if (minimal) return { path: entry.path, language: entry.language, lines: entry.lines, priorityHints: entry.priorityHints.slice(0, 3) };
+  return {
+    path: entry.path,
+    language: entry.language,
+    lines: entry.lines,
+    localImports: entry.localImports.slice(0, 8),
+    routes: entry.routes.slice(0, 6),
+    symbols: entry.symbols.slice(0, 8),
+    hasScannerResult: entry.hasScannerResult,
+    priorityHints: entry.priorityHints.slice(0, 5),
+    frameworkHints: entry.frameworkHints.slice(0, 5),
+    securityInventory: {
+      entrypoints: entry.securityInventory.entrypoints.slice(0, 8),
+      trustBoundaryCount: entry.securityInventory.trustBoundaries.length,
+      sinks: entry.securityInventory.sinks.slice(0, 12).map((sink) => ({ category: sink.category, line: sink.line })),
+      guardCount: entry.securityInventory.guards.length
+    }
+  };
+}
+
+function truncateString(value: string, maxChars: number): string {
+  if (value.length <= maxChars) return value;
+  return `${value.slice(0, Math.max(0, maxChars - 36))}\n[TRUNCATED BY AUDIT CONTEXT BUDGET]`;
+}
+
 function buildManifest(files: IndexedFile[], scannerResults: ScannerResult[], allFiles = files): ManifestEntry[] {
   const scannerPaths = new Set(scannerResults.map((result) => result.path).filter(Boolean));
   const importGraph = buildImportGraph(files, allFiles);
@@ -292,6 +350,19 @@ function buildManifest(files: IndexedFile[], scannerResults: ScannerResult[], al
   }).sort((a, b) => scoreManifestFile(b) - scoreManifestFile(a));
 }
 
+function buildBoundedFilePack(targets: AuditTarget[], allowed: Map<string, IndexedFile>, remainingChars: number, importGraph: Map<string, string[]>, memory: AuditMemory, fixedPromptChars: number, requestCharBudget: number) {
+  const maxRoundPromptChars = Math.max(3_000, requestCharBudget - fixedPromptChars);
+  let sourceBudget = Math.max(1_000, Math.min(remainingChars, maxRoundPromptChars - AUDIT_PROMPT_OVERHEAD_CHARS));
+  let pack = buildFilePack(targets, allowed, sourceBudget, importGraph, memory);
+  let prompt = buildAuditRoundPrompt(pack, memory);
+  while (pack.files.length && fixedPromptChars + prompt.length > requestCharBudget && sourceBudget > 1_000) {
+    sourceBudget = Math.max(1_000, Math.floor(sourceBudget * 0.7));
+    pack = buildFilePack(targets, allowed, sourceBudget, importGraph, memory);
+    prompt = buildAuditRoundPrompt(pack, memory);
+  }
+  return pack;
+}
+
 function buildFilePack(targets: AuditTarget[], allowed: Map<string, IndexedFile>, charBudget: number, importGraph: Map<string, string[]>, memory: AuditMemory) {
   const output: Array<{ path: string; language: string; lines: number; startLine: number; endLine: number; chunkIndex: number; chunkCount: number; localImports: string[]; frameworkHints: string[]; securityInventory: SecurityInventory; previousNotes: string[]; content: string }> = [];
   let charCount = 0;
@@ -302,7 +373,7 @@ function buildFilePack(targets: AuditTarget[], allowed: Map<string, IndexedFile>
     const remaining = charBudget - charCount;
     if (remaining <= 0) break;
     const clipped = content.length > remaining ? `${content.slice(0, remaining)}\n[TRUNCATED BY AUDIT BUDGET]` : content;
-    output.push({
+    const nextFile = {
       path: file.path,
       language: file.language,
       lines: file.lineCount,
@@ -315,7 +386,10 @@ function buildFilePack(targets: AuditTarget[], allowed: Map<string, IndexedFile>
       securityInventory: offsetInventory(buildSecurityInventory({ ...file, content: lineSlice(file.content, target.startLine, target.endLine), lineCount: target.endLine - target.startLine + 1 }), target.startLine - 1),
       previousNotes: memory.notes.filter((item) => item.path === file.path).map((item) => item.note).slice(-5),
       content: clipped
-    });
+    };
+    const nextOutput = [...output, nextFile];
+    if (JSON.stringify({ files: nextOutput, charCount: charCount + clipped.length }, null, 2).length > charBudget && output.length) break;
+    output.push(nextFile);
     charCount += clipped.length;
   }
   return { files: output, charCount };
@@ -351,7 +425,7 @@ function heuristicEntryFiles(files: IndexedFile[], scannerResults: ScannerResult
     .map((file) => file.path);
 }
 
-function buildAuditChunks(files: IndexedFile[], windowLines = 180): Map<string, AuditTarget[]> {
+function buildAuditChunks(files: IndexedFile[], windowLines = AUDIT_CHUNK_LINES): Map<string, AuditTarget[]> {
   const chunks = new Map<string, AuditTarget[]>();
   for (const file of files) {
     const targets: AuditTarget[] = [];
@@ -372,14 +446,17 @@ function createAuditTraversal(files: IndexedFile[], scannerResults: ScannerResul
   const queued = new Set<string>();
   const queue: AuditTarget[] = [];
   const keyOf = (target: AuditTarget) => `${target.path}:${target.startLine}:${target.endLine}`;
-  const pushTargets = (targets: AuditTarget[]) => {
+  const pushTargets = (targets: AuditTarget[], front = false) => {
+    const additions: AuditTarget[] = [];
     for (const target of targets) {
       if (!allowed.has(target.path)) continue;
       const key = keyOf(target);
       if (queued.has(key)) continue;
       queued.add(key);
-      queue.push(target);
+      additions.push(target);
     }
+    if (front) queue.unshift(...additions);
+    else queue.push(...additions);
   };
   const pushFirstChunks = (paths: string[]) => {
     for (const filePath of paths) {
@@ -399,7 +476,7 @@ function createAuditTraversal(files: IndexedFile[], scannerResults: ScannerResul
       pushFirstChunks(paths.map((filePath) => filePath.replaceAll("\\", "/").replace(/^\/+/, "")));
     },
     enqueueTargets(targets: AuditTarget[]) {
-      pushTargets(targets);
+      pushTargets(targets, true);
     },
     next(memory: AuditMemory, limit: number, maxFiles: number): AuditTarget[] {
       while (queue.length && hasInspectedRange(memory, queue[0].path, queue[0].startLine, queue[0].endLine)) queue.shift();
@@ -499,7 +576,12 @@ function resolveToolCalls(calls: Array<z.infer<typeof auditToolCallSchema>>, all
   for (const call of calls.slice(0, 20)) {
     if (call.type === "read_file" && call.path) {
       const file = allowed.get(normalizePath(call.path));
-      if (file) targets.push(targetWindow(file.path, 1, file.lineCount, 1, 1));
+      if (file) {
+        const startLine = Math.min(file.lineCount, Math.max(1, call.startLine ?? 1));
+        const requestedEnd = call.endLine && call.endLine >= startLine ? call.endLine : startLine + AUDIT_CHUNK_LINES - 1;
+        const endLine = Math.min(file.lineCount, requestedEnd);
+        targets.push(targetWindow(file.path, startLine, endLine, 1, 1));
+      }
       continue;
     }
     if (call.type === "search_text" && call.query) {

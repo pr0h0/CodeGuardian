@@ -192,13 +192,15 @@ export const auditResponseJsonSchema: AiJsonSchema = {
         items: {
           type: "object",
           additionalProperties: false,
-          required: ["type", "path", "query", "symbol", "category", "reason"],
+          required: ["type", "path", "query", "symbol", "category", "startLine", "endLine", "reason"],
           properties: {
             type: { type: "string", enum: ["read_file", "search_text", "search_symbol", "find_category"] },
             path: { type: "string" },
             query: { type: "string" },
             symbol: { type: "string" },
             category: { type: "string", enum: [...categoryValues, ""] },
+            startLine: nullableLineNumber,
+            endLine: nullableLineNumber,
             reason: { type: "string" }
           }
         }
