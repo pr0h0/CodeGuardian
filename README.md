@@ -95,7 +95,7 @@ AI_HIGH_MODEL=deepseek-v4-pro
 DEEPSEEK_BASE_URL=https://api.deepseek.com
 ```
 
-AI triage routes straightforward medium-severity scanner findings to the low tier, most high-signal findings to the medium tier, and only complex critical/high candidates such as correlation chains, authz, SSRF, RCE, path traversal, and command injection to the high tier. Each tier uses `AI_LOW_MODEL`, `AI_MEDIUM_MODEL`, or `AI_HIGH_MODEL` when set, otherwise it falls back to `AI_MODEL`. Reports include per-tier/per-model request count, input tokens, output tokens, total tokens, and USD cost when the provider response includes cost fields.
+AI triage routes straightforward medium-severity scanner findings to the low tier, most high-signal findings to the medium tier, and only complex critical/high candidates such as correlation chains, authz, SSRF, RCE, path traversal, and command injection to the high tier. Each tier uses `AI_LOW_MODEL`, `AI_MEDIUM_MODEL`, or `AI_HIGH_MODEL` when set, otherwise it falls back to `AI_MODEL`. Reports include per-tier/per-model request count, input tokens, cached input tokens, output tokens, total tokens, and USD cost. When the provider response omits cost fields, Codeguardian estimates cost from checked-in per-1M-token pricing for known OpenAI, Anthropic, and DeepSeek models; cached input pricing is used only when cached token counts are present.
 
 OpenRouter:
 

@@ -153,8 +153,8 @@ function renderAiUsage(rows?: Row[]): string[] {
   if (!Array.isArray(rows) || !rows.length) return ["- Token usage: not reported by provider."];
   const lines = [
     "",
-    "| Tier | Provider | Model | Requests | Input tokens | Output tokens | Total tokens | Input cost USD | Output cost USD | Total cost USD |",
-    "|---|---|---|---:|---:|---:|---:|---:|---:|---:|"
+    "| Tier | Provider | Model | Requests | Input tokens | Cached input tokens | Output tokens | Total tokens | Input cost USD | Cached input cost USD | Output cost USD | Total cost USD |",
+    "|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|"
   ];
   for (const row of rows) {
     lines.push([
@@ -163,9 +163,11 @@ function renderAiUsage(rows?: Row[]): string[] {
       tableCell(row.model),
       formatInteger(row.requests),
       formatInteger(row.inputTokens),
+      formatInteger(row.cachedInputTokens),
       formatInteger(row.outputTokens),
       formatInteger(row.totalTokens),
       formatCost(row.inputCostUsd),
+      formatCost(row.cachedInputCostUsd),
       formatCost(row.outputCostUsd),
       formatCost(row.costUsd)
     ].join(" | ").replace(/^/, "| ").replace(/$/, " |"));

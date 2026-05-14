@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { buildOpenAiResponseParams, supportsTemperature } from "../../src/ai/openai.js";
+import { buildOpenAiCompatibleChatParams } from "../../src/ai/openaiCompatible.js";
 import { aiHighModel, aiLowModel, aiMediumModel, createAiProvider } from "../../src/ai/provider.js";
 import { aiFindingJsonSchema } from "../../src/ai/schemas.js";
 import { loadEnv } from "../../src/config/env.js";
@@ -57,5 +58,25 @@ describe("provider config", () => {
       name: "security_triage_finding",
       strict: true
     });
+  });
+
+  it("uses JSON object mode for DeepSeek-compatible chat completions", () => {
+    const directParams = buildOpenAiCompatibleChatParams("deepseek", "deepseek-v4-pro", {
+      system: "Return raw JSON only.",
+      messages: [{ role: "user", content: "hi" }],
+      jsonSchema: aiFindingJsonSchema,
+      temperature: 0,
+      maxTokens: 100
+    });
+    const routedParams = buildOpenAiCompatibleChatParams("openrouter", "deepseek/deepseek-v4-pro", {
+      system: "Return raw JSON only.",
+      messages: [{ role: "user", content: "hi" }],
+      jsonSchema: aiFindingJsonSchema,
+      temperature: 0,
+      maxTokens: 100
+    });
+
+    expect(directParams.response_format).toEqual({ type: "json_object" });
+    expect(routedParams.response_format).toEqual({ type: "json_object" });
   });
 });

@@ -29,14 +29,16 @@ describe("report", () => {
         inputTokens: 1200,
         outputTokens: 300,
         totalTokens: 1500,
+        cachedInputTokens: 200,
+        cachedInputCostUsd: 0.0002,
         inputCostUsd: 0.001,
         outputCostUsd: 0.002,
         costUsd: 0.003
       }]
     });
     const content = fs.readFileSync(file, "utf8");
-    expect(content).toContain("| Tier | Provider | Model | Requests | Input tokens | Output tokens | Total tokens | Input cost USD | Output cost USD | Total cost USD |");
-    expect(content).toContain("| medium | openrouter | balanced | 2 | 1200 | 300 | 1500 | 0.001000 | 0.002000 | 0.003000 |");
+    expect(content).toContain("| Tier | Provider | Model | Requests | Input tokens | Cached input tokens | Output tokens | Total tokens | Input cost USD | Cached input cost USD | Output cost USD | Total cost USD |");
+    expect(content).toContain("| medium | openrouter | balanced | 2 | 1200 | 200 | 300 | 1500 | 0.001000 | 0.000200 | 0.002000 | 0.003000 |");
   });
 
   it("escapes html tags in markdown output", () => {
@@ -274,5 +276,28 @@ describe("report", () => {
     expect(content).toContain("Additional SAST Findings");
     expect(content).toContain("AI Usage");
     expect(content).toContain("0.000100");
+  });
+
+  it("keeps html report headers in normal document flow", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cg-"));
+    const file = writeHtmlReport(dir, {
+      scan: { id: "1", repo_path: ".", status: "completed" },
+      files: [],
+      findings: [],
+      scannerResults: [{
+        scanner: "semgrep",
+        rule_id: "eval",
+        title: "Use of eval",
+        category: "code-injection",
+        severity: "medium",
+        path: "src/eval.ts",
+        start_line: 3
+      }]
+    });
+
+    const content = fs.readFileSync(file, "utf8");
+    expect(content).not.toMatch(/header\s*\{[^}]*position\s*:/);
+    expect(content).not.toMatch(/th\s*\{[^}]*position\s*:/);
+    expect(content).not.toMatch(/th\s*\{[^}]*top\s*:/);
   });
 });

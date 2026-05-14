@@ -60,7 +60,7 @@ function renderDocument(input: {
   <style>
     :root { color-scheme: light dark; --bg:#0f172a; --panel:#111827; --muted:#94a3b8; --text:#e5e7eb; --line:#334155; --accent:#38bdf8; --high:#fb7185; --med:#fbbf24; --low:#60a5fa; --ok:#34d399; }
     body { margin:0; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif; background:var(--bg); color:var(--text); }
-    header { padding:24px 32px; border-bottom:1px solid var(--line); position:sticky; top:0; background:rgba(15,23,42,.96); backdrop-filter: blur(8px); z-index:2; }
+    header { padding:24px 32px; border-bottom:1px solid var(--line); background:rgba(15,23,42,.96); backdrop-filter: blur(8px); }
     h1 { margin:0 0 10px; font-size:24px; }
     h2 { margin:0; font-size:18px; }
     main { padding:24px 32px 48px; max-width:1500px; margin:0 auto; }
@@ -76,7 +76,7 @@ function renderDocument(input: {
     .section-body { padding:16px; }
     table { width:100%; border-collapse:collapse; font-size:13px; }
     th, td { text-align:left; vertical-align:top; border-bottom:1px solid var(--line); padding:9px 8px; }
-    th { color:#cbd5e1; position:sticky; top:88px; background:var(--panel); }
+    th { color:#cbd5e1; background:var(--panel); }
     .card { border:1px solid var(--line); border-radius:8px; padding:14px; margin:12px 0; background:#0b1220; }
     .meta { color:var(--muted); font-size:12px; display:flex; gap:10px; flex-wrap:wrap; }
     .badge { border-radius:999px; padding:2px 8px; font-size:12px; border:1px solid var(--line); }
@@ -252,7 +252,7 @@ function renderScannerCounts(rows: Row[]): string {
 
 function renderAiUsageTable(rows: Row[]): string {
   if (!rows.length) return "<p>Token usage was not reported by the provider.</p>";
-  return `<table><thead><tr><th>Tier</th><th>Provider</th><th>Model</th><th>Requests</th><th>Input tokens</th><th>Output tokens</th><th>Total tokens</th><th>Input cost USD</th><th>Output cost USD</th><th>Total cost USD</th></tr></thead><tbody>${rows.map((item) => `<tr data-row><td>${esc(item.tier)}</td><td>${esc(item.provider)}</td><td>${esc(item.model)}</td><td>${esc(formatInteger(item.requests))}</td><td>${esc(formatInteger(item.inputTokens))}</td><td>${esc(formatInteger(item.outputTokens))}</td><td>${esc(formatInteger(item.totalTokens))}</td><td>${esc(formatCost(item.inputCostUsd))}</td><td>${esc(formatCost(item.outputCostUsd))}</td><td>${esc(formatCost(item.costUsd))}</td></tr>`).join("")}</tbody></table>`;
+  return `<table><thead><tr><th>Tier</th><th>Provider</th><th>Model</th><th>Requests</th><th>Input tokens</th><th>Cached input tokens</th><th>Output tokens</th><th>Total tokens</th><th>Input cost USD</th><th>Cached input cost USD</th><th>Output cost USD</th><th>Total cost USD</th></tr></thead><tbody>${rows.map((item) => `<tr data-row><td>${esc(item.tier)}</td><td>${esc(item.provider)}</td><td>${esc(item.model)}</td><td>${esc(formatInteger(item.requests))}</td><td>${esc(formatInteger(item.inputTokens))}</td><td>${esc(formatInteger(item.cachedInputTokens))}</td><td>${esc(formatInteger(item.outputTokens))}</td><td>${esc(formatInteger(item.totalTokens))}</td><td>${esc(formatCost(item.inputCostUsd))}</td><td>${esc(formatCost(item.cachedInputCostUsd))}</td><td>${esc(formatCost(item.outputCostUsd))}</td><td>${esc(formatCost(item.costUsd))}</td></tr>`).join("")}</tbody></table>`;
 }
 
 function formatInteger(value: unknown): string {
