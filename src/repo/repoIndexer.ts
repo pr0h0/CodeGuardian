@@ -24,6 +24,7 @@ export interface IndexOptions {
   maxFileSize: number;
   include?: string[];
   exclude?: string[];
+  cacheMap?: Map<string, string>; // path -> sha256 of previously indexed content
 }
 
 function isLikelyBinary(buffer: Buffer): boolean {
@@ -58,8 +59,15 @@ export function indexRepository(db: Db, scanId: string, repoPath: string, option
       continue;
     }
     const content = buffer.toString("utf8");
+    const hash = sha256(content);
+    // Skip full indexing if content hasn't changed since last scan
+    if (options.cacheMap?.get(rel) === hash) {
+      insertFile(db, { scanId, path: rel, language: "", sizeBytes: stat.size, sha256: hash, lineCount: 0, indexed: true, skippedReason: "cached, unchanged" });
+      indexed.push({ path: rel, absolutePath, language: "", content: "", lineCount: 0 });
+      continue;
+    }
     const language = detectLanguage(rel, content.split(/\r?\n/, 1)[0] ?? "");
-    const fileId = insertFile(db, { scanId, path: rel, language, sizeBytes: stat.size, sha256: sha256(content), lineCount: lineCount(content), indexed: true });
+    const fileId = insertFile(db, { scanId, path: rel, language, sizeBytes: stat.size, sha256: hash, lineCount: lineCount(content), indexed: true });
     for (const chunk of buildChunks(content)) insertChunk(db, scanId, fileId, rel, chunk.startLine, chunk.endLine, chunk.content, sha256(chunk.content));
     for (const symbol of extractSymbols(content)) insertSymbol(db, { scanId, fileId, path: rel, name: symbol.name, kind: symbol.kind, startLine: symbol.startLine, endLine: symbol.endLine, signature: symbol.signature, exported: symbol.exported ? 1 : 0, metadataJson: "{}" });
     for (const route of detectRoutes(path.join("/", rel), content)) insertRoute(db, { scanId, fileId, method: route.method, routePath: route.routePath, handlerName: route.handlerName ?? null, startLine: route.startLine, endLine: route.endLine, frameworkGuess: route.frameworkGuess, metadataJson: "{}" });

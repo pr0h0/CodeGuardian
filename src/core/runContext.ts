@@ -29,6 +29,8 @@ export interface CliOptions {
   verbose?: boolean;
   profile?: Profile;
   incremental?: boolean;
+  ci?: boolean;
+  diff?: string | boolean;
 }
 
 export interface RunContext {
@@ -37,8 +39,8 @@ export interface RunContext {
   projectConfig: ProjectConfig;
   repoPath: string;
   outDir: string;
-  options: Required<Omit<CliOptions, "provider" | "model" | "target" | "aiTriageTarget">>
-    & Pick<CliOptions, "provider" | "model" | "target">
+  options: Required<Omit<CliOptions, "provider" | "model" | "target" | "aiTriageTarget" | "diff">>
+    & Pick<CliOptions, "provider" | "model" | "target" | "diff">
     & { aiTriageTargetCodeFindings: number };
 }
 
@@ -77,7 +79,9 @@ export function createRunContext(repoPath: string, options: CliOptions = {}): Ru
       model: options.model,
       target: options.target,
       profile: options.profile ?? projectConfig.profile ?? "all",
-      incremental: options.incremental ?? projectConfig.incremental ?? false
+      incremental: options.incremental ?? projectConfig.incremental ?? false,
+      ci: options.ci ?? false,
+      diff: options.diff ?? undefined
     }
   };
 }

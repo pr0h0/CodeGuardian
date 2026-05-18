@@ -41,6 +41,7 @@ import type { ScannerResult, Finding } from "../scanners/types.js";
 import { sha256 } from "../utils/hashing.js";
 import { lineSlice } from "../utils/lineMap.js";
 import { redactSecrets } from "../utils/redact.js";
+import { execSync } from "node:child_process";
 
 type AiProviderSet = Record<AiTier, AiProvider> & { critic?: AiProvider };
 
@@ -76,40 +77,44 @@ export async function runScan(ctx: RunContext): Promise<{ scanId: string; report
   for (const tool of toolStatuses) ctx.logger.info(`tools: ${tool.name} ${tool.available ? "available" : "missing"}`);
   try {
     ctx.logger.info("indexing repository");
-    const files = indexRepository(db, scanId, ctx.repoPath, {
+    const cacheRows = db.prepare("SELECT path, sha256 FROM scan_cache WHERE repo_path = ?").all(ctx.repoPath) as Array<{ path: string; sha256: string }>;
+    const cacheMap = new Map(cacheRows.map((row) => [row.path, row.sha256]));
+    // If --diff is set, restrict scanning to files changed in git
+    let diffFiles: string[] | undefined;
+    if (ctx.options.diff !== undefined) {
+      diffFiles = getGitDiffFiles(ctx.repoPath, typeof ctx.options.diff === "string" ? ctx.options.diff : undefined);
+      ctx.logger.info(`diff: ${diffFiles.length} files changed since ${typeof ctx.options.diff === "string" ? ctx.options.diff : "HEAD"}`);
+    }
+    const allFiles = indexRepository(db, scanId, ctx.repoPath, {
       maxFiles: ctx.options.maxFiles,
       maxFileSize: ctx.options.maxFileSize,
-      include: ctx.options.include,
-      exclude: ctx.options.exclude
+      include: [...(ctx.options.include ?? []), ...(diffFiles ?? [])],
+      exclude: ctx.options.exclude,
+      cacheMap: (ctx.options.incremental || diffFiles !== undefined) ? cacheMap : undefined
     });
-    ctx.logger.info(`index: indexed ${files.length} files`);
+    ctx.logger.info(`index: indexed ${allFiles.length} files (${allFiles.filter(f => !f.content).length} cached/unchanged)`);
     const aiInstructions = loadAiInstructions(ctx.repoPath);
     if (aiInstructions.path) ctx.logger.info(`ai-instructions: loaded ${aiInstructions.path} chars=${aiInstructions.chars}`);
-    const changedPaths = new Set(files.filter((file) => {
+    const changedPaths = new Set(allFiles.filter((file) => {
+      if (!file.content) return false; // cached, unchanged — skip
       const cached = db.prepare("SELECT sha256 FROM scan_cache WHERE repo_path = ? AND path = ?").get(ctx.repoPath, file.path) as { sha256?: string } | undefined;
       return cached?.sha256 !== sha256(file.content);
     }).map((file) => file.path));
-    const localFiles = ctx.options.incremental ? files.filter((file) => changedPaths.has(file.path)) : files;
+    const localFiles = ctx.options.incremental ? allFiles.filter((file) => changedPaths.has(file.path)) : allFiles;
     if (ctx.options.incremental) ctx.logger.info(`incremental: changed files=${changedPaths.size} localScannerFiles=${localFiles.length}`);
-    for (const file of files) {
+    for (const file of allFiles) {
       const record = (getScanBundle(db, scanId).files as any[]).find((item) => item.path === file.path);
       if (record?.sha256) upsertScanCache(db, ctx.repoPath, { path: file.path, sha256: record.sha256, language: file.language, lineCount: file.lineCount });
     }
-    ctx.logger.info("scanners: running custom rules");
-    const customResults = runCustomRules(localFiles);
-    ctx.logger.info(`scanners: custom rules produced ${customResults.length} results`);
-    ctx.logger.info("scanners: running taint-lite");
-    const taintResults = runTaintLite(localFiles);
-    ctx.logger.info(`scanners: taint-lite produced ${taintResults.length} results`);
-    ctx.logger.info("scanners: running taint-flow");
-    const taintFlowResults = runTaintFlow(localFiles);
-    ctx.logger.info(`scanners: taint-flow produced ${taintFlowResults.length} results`);
-    ctx.logger.info("scanners: running config checks");
-    const configResults = runConfigChecks(localFiles);
-    ctx.logger.info(`scanners: config checks produced ${configResults.length} results`);
-    ctx.logger.info("scanners: running quality checks");
-    const qualityResults = runQualityChecks(localFiles);
-    ctx.logger.info(`scanners: quality checks produced ${qualityResults.length} results`);
+    ctx.logger.info("scanners: running local scanners in parallel");
+    const localScannerJobs = [
+      Promise.resolve().then(() => { const r = runCustomRules(localFiles); ctx.logger.info(`scanners: custom rules produced ${r.length} results`); return r; }),
+      Promise.resolve().then(() => { const r = runTaintLite(localFiles); ctx.logger.info(`scanners: taint-lite produced ${r.length} results`); return r; }),
+      Promise.resolve().then(() => { const r = runTaintFlow(localFiles); ctx.logger.info(`scanners: taint-flow produced ${r.length} results`); return r; }),
+      Promise.resolve().then(() => { const r = runConfigChecks(localFiles); ctx.logger.info(`scanners: config checks produced ${r.length} results`); return r; }),
+      Promise.resolve().then(() => { const r = runQualityChecks(localFiles); ctx.logger.info(`scanners: quality checks produced ${r.length} results`); return r; })
+    ];
+    const [customResults, taintResults, taintFlowResults, configResults, qualityResults] = await Promise.all(localScannerJobs);
     ctx.logger.info("scanners: running external scanners");
     const scannerJobs = [
       runLoggedScanner(ctx, db, scanId, "semgrep", () => runSemgrep(ctx.repoPath, scannerTimeout(ctx, "semgrep"))),
@@ -131,14 +136,14 @@ export async function runScan(ctx: RunContext): Promise<{ scanId: string; report
       })
     ];
     ctx.logger.info("scanners: running compliance checks");
-    const complianceResults = runComplianceChecks(files, preliminaryScannerResults);
+    const complianceResults = runComplianceChecks(allFiles, preliminaryScannerResults);
     ctx.logger.info(`scanners: compliance checks produced ${complianceResults.length} results`);
     ctx.logger.info("scanners: running correlation checks");
-    const correlationResults = runCorrelationChecks(files, preliminaryScannerResults);
+    const correlationResults = runCorrelationChecks(allFiles, preliminaryScannerResults);
     ctx.logger.info(`scanners: correlation checks produced ${correlationResults.length} results`);
     const rawScannerResults = [...preliminaryScannerResults, ...complianceResults, ...correlationResults];
     const configuredResults = applyProjectPolicy(rawScannerResults, ctx);
-    const suppressed = applySuppressions(ctx.repoPath, files, configuredResults);
+    const suppressed = applySuppressions(ctx.repoPath, allFiles, configuredResults);
     if (suppressed.summary.suppressed) ctx.logger.info(`suppressions: removed ${suppressed.summary.suppressed} results`);
     const scannerResults = attachScannerFingerprints(suppressed.results);
     ctx.logger.info(`scanners: total ${scannerResults.length} results`);
@@ -152,7 +157,7 @@ export async function runScan(ctx: RunContext): Promise<{ scanId: string; report
       ? await runAiTriageBatches({
         providers: aiProviders,
         candidates: triageCandidates,
-        files,
+        files: allFiles,
         scannerResults,
         aiInstructions: aiInstructions.content,
         maxContextChars: ctx.env.CODEGUARDIAN_MAX_CONTEXT_CHARS,
@@ -165,7 +170,7 @@ export async function runScan(ctx: RunContext): Promise<{ scanId: string; report
     if (aiBudget.triagedScannerResults) ctx.logger.info(`ai-budget: triaged=${aiBudget.triagedScannerResults} context chars=${aiBudget.triageContextChars} estimatedTokens=${aiBudget.estimatedTriageTokens}`);
     if (aiProviders && ctx.options.aiAudit) {
       ctx.logger.info(`ai-audit: enabled maxFiles=${ctx.options.maxAiAuditFiles} maxRounds=${ctx.options.maxAiAuditRounds} maxChars=${ctx.options.maxAiAuditChars}`);
-      const auditFindings = await runExploratoryAudit(aiProviders.medium, files, scannerResults, {
+      const auditFindings = await runExploratoryAudit(aiProviders.medium, allFiles, scannerResults, {
         maxFiles: ctx.options.maxAiAuditFiles,
         maxRounds: ctx.options.maxAiAuditRounds,
         maxChars: ctx.options.maxAiAuditChars,
@@ -187,6 +192,7 @@ export async function runScan(ctx: RunContext): Promise<{ scanId: string; report
     ctx.logger.info(`reports: writing format=${ctx.options.format} out=${ctx.outDir}`);
     const reportFiles = writeReports(ctx.outDir, ctx.options.format, bundle, warnings);
     for (const file of reportFiles) ctx.logger.info(`reports: wrote ${file}`);
+    if (ctx.options.ci) emitCiAnnotations(finalFindings, ctx.options.failOn);
     return { scanId, reportFiles, warnings, exitCode: failExitCode(finalFindings, ctx.options.failOn) };
   } catch (error) {
     ctx.logger.error(`scan failed: ${error instanceof Error ? error.message : String(error)}`);
@@ -245,16 +251,37 @@ async function runAiTriageBatches(input: {
       input.aiBudget.triageContextChars += JSON.stringify(contextPack).length;
       input.aiBudget.triagedScannerResults += 1;
       const tier = selectAiTriageTier(result);
-      input.log(`triage: model tier=${tier} score=${scoreScannerResult(result)} ${result.scanner}/${result.ruleId} ${result.path ?? ""}:${result.startLine ?? ""}`);
-      findings.push(...await aiTriage(
-        input.providers[tier],
-        [contextPack],
-        input.log,
-        input.providers.critic,
-        resolveRequestedContext,
-        [formatTriageLabel(result, absoluteIndex, input.candidates.length)],
-        input.providers.low
-      ));
+      const useCritic = input.providers.critic && (result.severity === "critical" || result.severity === "high");
+      input.log(`triage: model tier=${tier} score=${scoreScannerResult(result)} critic=${useCritic ? "yes" : "skip"} ${result.scanner}/${result.ruleId} ${result.path ?? ""}:${result.startLine ?? ""}`);
+      const provider = input.providers[tier];
+      try {
+        findings.push(...await aiTriage(
+          provider,
+          [contextPack],
+          input.log,
+          useCritic ? input.providers.critic : undefined,
+          resolveRequestedContext,
+          [formatTriageLabel(result, absoluteIndex, input.candidates.length)],
+          provider
+        ));
+      } catch (error) {
+        if (tier !== "low") {
+          const fallbackTier = tier === "high" ? "medium" : "low";
+          input.log(`triage: ${tier} failed, falling back to ${fallbackTier}: ${error instanceof Error ? error.message : String(error)}`);
+          const fallbackProvider = input.providers[fallbackTier];
+          findings.push(...await aiTriage(
+            fallbackProvider,
+            [contextPack],
+            input.log,
+            undefined,
+            resolveRequestedContext,
+            [formatTriageLabel(result, absoluteIndex, input.candidates.length)],
+            fallbackProvider
+          ));
+        } else {
+          throw error;
+        }
+      }
     }
     if (input.targetActiveFindings > 0 && activeFindingCount(findings) >= input.targetActiveFindings) {
       input.log(`triage: target active code findings reached ${activeFindingCount(findings)}/${input.targetActiveFindings}`);
@@ -429,4 +456,33 @@ function failExitCode(findings: Array<{ severity: string }>, failOn: string): nu
   if (failOn === "none") return 0;
   const threshold = SEVERITY_ORDER.indexOf(failOn as any);
   return findings.some((finding) => SEVERITY_ORDER.indexOf(finding.severity as any) <= threshold) ? 2 : 0;
+}
+
+/** Output GitHub Actions annotations for findings matching the failOn threshold. */
+function emitCiAnnotations(findings: Array<{ path?: string | null; startLine?: number | null; title: string; severity: string; category: string; reasoning: string; status?: string | null }>, failOn: string): void {
+  const threshold = failOn === "none" ? SEVERITY_ORDER.length - 1 : SEVERITY_ORDER.indexOf(failOn as any);
+  for (const finding of findings) {
+    if (finding.status === "false_positive") continue;
+    const findingLevel = SEVERITY_ORDER.indexOf(finding.severity as any);
+    if (findingLevel > threshold) continue;
+    const file = finding.path ?? "";
+    const line = finding.startLine ?? 1;
+    const title = `[${finding.severity}] ${finding.category}: ${finding.title}`;
+    const message = finding.reasoning.slice(0, 500).replace(/\n/g, "%0A");
+    // GitHub Actions annotation format
+    console.log(`::error file=${file},line=${line},title=${title}::${message}`);
+  }
+  const summaryLine = findings.filter((f) => !f.status || f.status !== "false_positive").length;
+  console.log(`::notice::CodeGuardian scan complete: ${summaryLine} findings (fail-on: ${failOn})`);
+}
+
+/** Get files changed in git vs HEAD or a specific ref. Returns relative paths. */
+export function getGitDiffFiles(repoPath: string, ref?: string): string[] {
+  try {
+    const target = typeof ref === "string" && ref ? ref : "HEAD";
+    const output = execSync(`git -C "${repoPath}" diff --name-only ${target}`, { encoding: "utf8", timeout: 30_000 });
+    return output.split(/\r?\n/).filter(Boolean);
+  } catch {
+    return [];
+  }
 }

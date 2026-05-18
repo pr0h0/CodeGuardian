@@ -14,3 +14,4 @@ aiMediumModel: deepseek-chat
 aiHighModel: deepseek-v4-pro
 aiCritic: true
 incremental: false
+diff: false

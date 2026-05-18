@@ -1,45 +1,612 @@
 [
-  {"id":"js-eval","title":"Dynamic eval usage","severity":"high","category":"injection","regex":"\\beval\\s*\\(","extensions":[".js",".jsx",".ts",".tsx"]},
-  {"id":"js-function-constructor","title":"Function constructor usage","severity":"high","category":"injection","regex":"\\bnew\\s+Function\\s*\\(","extensions":[".js",".jsx",".ts",".tsx"]},
-  {"id":"js-prototype-pollution-assignment","title":"Prototype pollution assignment candidate","severity":"high","category":"prototype-pollution","regex":"(\\b(?:__proto__|constructor\\.prototype)\\b\\s*=|\\[[^\\]\\n]*(?:__proto__|constructor|prototype)[^\\]\\n]*\\]\\s*=)","extensions":[".js",".jsx",".ts",".tsx"]},
-  {"id":"js-prototype-pollution-unsafe-merge","title":"User-controlled object merge candidate","severity":"high","category":"prototype-pollution","regex":"\\b(Object\\.assign|(?:lodash\\.)?merge|deepmerge|defaultsDeep|set)\\s*\\([^\\n]*(req\\.|request\\.|params|query|body)","extensions":[".js",".jsx",".ts",".tsx"]},
-  {"id":"js-dynamic-object-key-assignment","title":"Dynamic object key assignment from user input","severity":"medium","category":"prototype-pollution","regex":"\\[[^\\]\\n]*(req\\.|request\\.|params|query|body)[^\\]\\n]*\\]\\s*=","extensions":[".js",".jsx",".ts",".tsx"]},
-  {"id":"node-child-process","title":"Child process execution sink","severity":"high","category":"command-injection","regex":"\\b(exec|execSync|spawn|spawnSync)\\s*\\(","extensions":[".js",".jsx",".ts",".tsx"]},
-  {"id":"python-shell-true","title":"Python subprocess shell=True","severity":"high","category":"command-injection","regex":"shell\\s*=\\s*True","extensions":[".py"]},
-  {"id":"sql-concat","title":"SQL query string concatenation candidate","severity":"high","category":"sql-injection","regex":"(SELECT|INSERT|UPDATE|DELETE).*(\\+|\\$\\{|%s|format\\()","extensions":[".js",".ts",".py",".php",".rb",".go",".java",".cs"]},
-  {"id":"raw-html","title":"Raw HTML injection candidate","severity":"medium","category":"xss","regex":"(innerHTML\\s*=|v-html=|dangerouslySetInnerHTML)","extensions":[".js",".jsx",".ts",".tsx",".vue"]},
-  {"id":"insecure-random","title":"Insecure random usage","severity":"medium","category":"weak-crypto","regex":"\\b(Math\\.random|random\\.random)\\s*\\(","extensions":[".js",".ts",".py"]},
-  {"id":"hardcoded-jwt-secret","title":"Hardcoded JWT secret candidate","severity":"high","category":"secrets","regex":"(JWT_SECRET|jwtSecret|secretKey)\\s*[:=]\\s*['\\\"][^'\\\"]{8,}['\\\"]"},
-  {"id":"generic-secret-assignment","title":"Hardcoded secret assignment candidate","severity":"high","category":"secrets","regex":"\\b(api[_-]?key|token|password|secret|client[_-]?secret)\\b\\s*[:=]\\s*['\\\"]?[^'\\\"\\s]{8,}['\\\"]?"},
-  {"id":"tls-disabled","title":"TLS verification disabled","severity":"high","category":"transport-security","regex":"(rejectUnauthorized\\s*:\\s*false|NODE_TLS_REJECT_UNAUTHORIZED\\s*=\\s*['\\\"]?0|verify\\s*=\\s*False)"},
-  {"id":"permissive-cors","title":"Permissive CORS candidate","severity":"medium","category":"cors","regex":"(Access-Control-Allow-Origin.*\\*|origin\\s*:\\s*['\\\"]\\*['\\\"]|cors\\s*\\(\\s*\\))"},
-  {"id":"path-traversal","title":"Path traversal sink candidate","severity":"high","category":"path-traversal","regex":"(sendFile|readFile|createReadStream|open)\\s*\\([^\\n]*(req\\.|request\\.|params|query|body)"},
-  {"id":"ssrf-candidate","title":"SSRF candidate","severity":"high","category":"ssrf","regex":"(fetch|axios\\.|request\\(|http\\.get|https\\.get)\\s*\\([^\\n]*(req\\.|request\\.|params|query|body)"},
-  {"id":"open-redirect","title":"Open redirect candidate","severity":"medium","category":"open-redirect","regex":"(redirect|location\\.href|Location)\\s*\\([^\\n]*(req\\.|request\\.|params|query|body)"},
-  {"id":"weak-crypto","title":"Weak cryptographic primitive","severity":"medium","category":"weak-crypto","regex":"\\b(md5|sha1|DES|RC4)\\b"},
-  {"id":"debug-endpoint","title":"Debug endpoint candidate","severity":"low","category":"debug","regex":"(app\\.(get|post)|router\\.(get|post)).*['\\\"]/(debug|admin|internal|actuator)"},
-  {"id":"default-password","title":"Default password candidate","severity":"high","category":"secrets","regex":"(password|passwd|pwd)\\s*[:=]\\s*['\\\"](admin|password|changeme|123456)['\\\"]"},
-  {"id":"auth-bypass-comment","title":"Security-sensitive bypass comment","severity":"medium","category":"auth","regex":"(TODO|FIXME|HACK).*(auth|csrf|xss|sql|security|bypass|permission|tenant)"},
-  {"id":"php-eval","title":"PHP dynamic code execution","severity":"high","category":"code-injection","regex":"\\b(eval|assert)\\s*\\(","extensions":[".php"]},
-  {"id":"php-command-exec-user-input","title":"PHP command execution from user input","severity":"high","category":"command-injection","regex":"\\b(system|exec|shell_exec|passthru|proc_open|popen)\\s*\\([^\\n]*(\\$_(GET|POST|REQUEST|COOKIE|SERVER)|argv|argc)","extensions":[".php"]},
-  {"id":"php-file-include-user-input","title":"PHP dynamic file include from user input","severity":"high","category":"file-inclusion","regex":"\\b(include|include_once|require|require_once)\\s*\\(?\\s*[^;\\n]*(\\$_(GET|POST|REQUEST|COOKIE)|argv)","extensions":[".php"]},
-  {"id":"php-unserialize-user-input","title":"PHP unsafe unserialize of user input","severity":"high","category":"deserialization","regex":"\\bunserialize\\s*\\([^\\n]*(\\$_(GET|POST|REQUEST|COOKIE)|file_get_contents\\s*\\(\\s*['\\\"]php://input)","extensions":[".php"]},
-  {"id":"php-sql-user-input","title":"PHP SQL query built with user input","severity":"high","category":"sql-injection","regex":"\\b(mysqli_query|mysql_query|pg_query|sqlite_query|query|prepare)\\s*\\([^;\\n]*(\\$_(GET|POST|REQUEST|COOKIE)|\\.\\s*\\$|\\$\\w+\\s*\\.)","extensions":[".php"]},
-  {"id":"php-path-traversal-user-input","title":"PHP filesystem access from user input","severity":"high","category":"path-traversal","regex":"\\b(file_get_contents|fopen|readfile|unlink|copy|rename|ZipArchive::open)\\s*\\([^\\n]*(\\$_(GET|POST|REQUEST|COOKIE)|argv)","extensions":[".php"]},
-  {"id":"php-ssrf-user-input","title":"PHP outbound request from user input","severity":"high","category":"ssrf","regex":"\\b(curl_setopt|file_get_contents|fopen)\\s*\\([^\\n]*(\\$_(GET|POST|REQUEST|COOKIE)|argv|CURLOPT_URL)","extensions":[".php"]},
-  {"id":"php-tls-verification-disabled","title":"PHP TLS verification disabled","severity":"high","category":"transport-security","regex":"(CURLOPT_SSL_VERIFYPEER\\s*,\\s*false|CURLOPT_SSL_VERIFYHOST\\s*,\\s*0|verify_peer\\s*['\\\"]?\\s*=>\\s*false)","extensions":[".php"]},
-  {"id":"php-header-open-redirect","title":"PHP open redirect candidate","severity":"medium","category":"open-redirect","regex":"\\bheader\\s*\\(\\s*['\\\"]Location:\\s*['\\\"]?\\s*\\.\\s*(\\$_(GET|POST|REQUEST|COOKIE)|\\$\\w+)","extensions":[".php"]},
-  {"id":"ruby-eval","title":"Ruby dynamic code execution","severity":"high","category":"code-injection","regex":"\\b(eval|class_eval|instance_eval|module_eval)\\s*\\(","extensions":[".rb"]},
-  {"id":"ruby-command-exec-user-input","title":"Ruby command execution from user input","severity":"high","category":"command-injection","regex":"\\b(system|exec|spawn|IO\\.popen|Open3\\.(capture2|capture2e|capture3|popen3))\\s*\\([^\\n]*(params|ARGV|ENV\\[|request\\.)","extensions":[".rb"]},
-  {"id":"ruby-deserialization-user-input","title":"Ruby unsafe deserialization of user input","severity":"high","category":"deserialization","regex":"\\b(Marshal\\.load|YAML\\.load|Psych\\.load)\\s*\\([^\\n]*(params|ARGV|request\\.|File\\.read|Base64\\.decode64)","extensions":[".rb"]},
-  {"id":"rails-sql-interpolation","title":"Rails SQL interpolation candidate","severity":"high","category":"sql-injection","regex":"\\b(where|find_by_sql|execute|order|pluck)\\s*\\([^\\n]*#\\{[^\\n]*\\}","extensions":[".rb"]},
-  {"id":"ruby-path-traversal-user-input","title":"Ruby filesystem access from user input","severity":"high","category":"path-traversal","regex":"\\b(File\\.(read|open|write|delete|unlink)|IO\\.read|send_file)\\s*\\([^\\n]*(params|ARGV|request\\.)","extensions":[".rb"]},
-  {"id":"ruby-ssrf-user-input","title":"Ruby outbound request from user input","severity":"high","category":"ssrf","regex":"\\b(Net::HTTP\\.(get|get_response|post)|URI\\.open|OpenURI\\.open_uri|Faraday\\.(get|post)|HTTParty\\.(get|post))\\s*\\([^\\n]*(params|ARGV|request\\.)","extensions":[".rb"]},
-  {"id":"rails-open-redirect","title":"Rails open redirect candidate","severity":"medium","category":"open-redirect","regex":"\\bredirect_to\\s+[^\\n]*(params|request\\.params)","extensions":[".rb"]},
-  {"id":"rails-render-inline-user-input","title":"Rails inline render from user input","severity":"high","category":"xss","regex":"\\brender\\s+inline:\\s*[^\\n]*(params|request\\.params)","extensions":[".rb"]},
-  {"id":"cli-argv-command-sink","title":"CLI argument reaches command execution sink","severity":"high","category":"command-injection","regex":"\\b(exec|execSync|spawn|spawnSync|system|shell_exec|passthru|proc_open|popen|subprocess\\.(run|call|Popen)|os\\.system)\\s*\\([^\\n]*(argv|ARGV|process\\.argv|sys\\.argv|commander\\.|yargs\\.)","extensions":[".js",".jsx",".ts",".tsx",".py",".php",".rb"]},
-  {"id":"cli-argv-filesystem-sink","title":"CLI argument reaches filesystem sink","severity":"medium","category":"path-traversal","regex":"\\b(readFile|writeFile|createReadStream|open|File\\.(read|open|write|delete)|IO\\.read|file_get_contents|fopen|readfile|unlink|os\\.remove|Path\\()\\s*\\([^\\n]*(argv|ARGV|process\\.argv|sys\\.argv|commander\\.|yargs\\.)","extensions":[".js",".jsx",".ts",".tsx",".py",".php",".rb"]},
-  {"id":"shell-script-unsafe-eval","title":"Shell script dynamic eval usage","severity":"high","category":"command-injection","regex":"\\beval\\s+\\$","extensions":[".sh",".bash"]},
-  {"id":"shell-script-unquoted-args","title":"Shell script unquoted argument expansion near command","severity":"medium","category":"command-injection","regex":"\\b(rm|cp|mv|tar|curl|wget|ssh|scp|rsync)\\b[^\\n]*(\\$1|\\$2|\\$@|\\$\\*)","extensions":[".sh",".bash"]},
-  {"id":"insecure-file-permission","title":"Overly permissive file permission","severity":"medium","category":"misconfiguration","regex":"\\b(chmod|File\\.chmod)\\s*\\(?\\s*(777|0o777|0777|['\\\"]777['\\\"])","extensions":[".js",".jsx",".ts",".tsx",".py",".php",".rb",".sh",".bash"]}
+  {
+    "id": "js-eval",
+    "title": "Dynamic eval usage",
+    "severity": "high",
+    "category": "injection",
+    "regex": "\\beval\\s*\\(",
+    "extensions": [
+      ".js",
+      ".jsx",
+      ".ts",
+      ".tsx"
+    ]
+  },
+  {
+    "id": "js-function-constructor",
+    "title": "Function constructor usage",
+    "severity": "high",
+    "category": "injection",
+    "regex": "\\bnew\\s+Function\\s*\\(",
+    "extensions": [
+      ".js",
+      ".jsx",
+      ".ts",
+      ".tsx"
+    ]
+  },
+  {
+    "id": "js-prototype-pollution-assignment",
+    "title": "Prototype pollution assignment candidate",
+    "severity": "high",
+    "category": "prototype-pollution",
+    "regex": "(\\b(?:__proto__|constructor\\.prototype)\\b\\s*=|\\[[^\\]\\n]*(?:__proto__|constructor|prototype)[^\\]\\n]*\\]\\s*=)",
+    "extensions": [
+      ".js",
+      ".jsx",
+      ".ts",
+      ".tsx"
+    ]
+  },
+  {
+    "id": "js-prototype-pollution-unsafe-merge",
+    "title": "User-controlled object merge candidate",
+    "severity": "high",
+    "category": "prototype-pollution",
+    "regex": "\\b(Object\\.assign|(?:lodash\\.)?merge|deepmerge|defaultsDeep|set)\\s*\\([^\\n]*(req\\.|request\\.|params|query|body)",
+    "extensions": [
+      ".js",
+      ".jsx",
+      ".ts",
+      ".tsx"
+    ]
+  },
+  {
+    "id": "js-dynamic-object-key-assignment",
+    "title": "Dynamic object key assignment from user input",
+    "severity": "medium",
+    "category": "prototype-pollution",
+    "regex": "\\[[^\\]\\n]*(req\\.|request\\.|params|query|body)[^\\]\\n]*\\]\\s*=",
+    "extensions": [
+      ".js",
+      ".jsx",
+      ".ts",
+      ".tsx"
+    ]
+  },
+  {
+    "id": "node-child-process",
+    "title": "Child process execution sink",
+    "severity": "high",
+    "category": "command-injection",
+    "regex": "\\b(exec|execSync|spawn|spawnSync)\\s*\\(",
+    "extensions": [
+      ".js",
+      ".jsx",
+      ".ts",
+      ".tsx"
+    ]
+  },
+  {
+    "id": "python-shell-true",
+    "title": "Python subprocess shell=True",
+    "severity": "high",
+    "category": "command-injection",
+    "regex": "shell\\s*=\\s*True",
+    "extensions": [
+      ".py"
+    ]
+  },
+  {
+    "id": "sql-concat",
+    "title": "SQL query string concatenation candidate",
+    "severity": "high",
+    "category": "sql-injection",
+    "regex": "(SELECT|INSERT|UPDATE|DELETE).*(\\+|\\$\\{|%s|format\\()",
+    "extensions": [
+      ".js",
+      ".ts",
+      ".py",
+      ".php",
+      ".rb",
+      ".go",
+      ".java",
+      ".cs"
+    ]
+  },
+  {
+    "id": "raw-html",
+    "title": "Raw HTML injection candidate",
+    "severity": "medium",
+    "category": "xss",
+    "regex": "(innerHTML\\s*=|v-html=|dangerouslySetInnerHTML)",
+    "extensions": [
+      ".js",
+      ".jsx",
+      ".ts",
+      ".tsx",
+      ".vue"
+    ]
+  },
+  {
+    "id": "insecure-random",
+    "title": "Insecure random usage",
+    "severity": "medium",
+    "category": "weak-crypto",
+    "regex": "\\b(Math\\.random|random\\.random)\\s*\\(",
+    "extensions": [
+      ".js",
+      ".ts",
+      ".py"
+    ]
+  },
+  {
+    "id": "hardcoded-jwt-secret",
+    "title": "Hardcoded JWT secret candidate",
+    "severity": "high",
+    "category": "secrets",
+    "regex": "(JWT_SECRET|jwtSecret|secretKey)\\s*[:=]\\s*['\\\"][^'\\\"]{8,}['\\\"]"
+  },
+  {
+    "id": "generic-secret-assignment",
+    "title": "Hardcoded secret assignment candidate",
+    "severity": "high",
+    "category": "secrets",
+    "regex": "\\b(api[_-]?key|token|password|secret|client[_-]?secret)\\b\\s*[:=]\\s*['\\\"]?[^'\\\"\\s]{8,}['\\\"]?"
+  },
+  {
+    "id": "tls-disabled",
+    "title": "TLS verification disabled",
+    "severity": "high",
+    "category": "transport-security",
+    "regex": "(rejectUnauthorized\\s*:\\s*false|NODE_TLS_REJECT_UNAUTHORIZED\\s*=\\s*['\\\"]?0|verify\\s*=\\s*False)"
+  },
+  {
+    "id": "permissive-cors",
+    "title": "Permissive CORS candidate",
+    "severity": "medium",
+    "category": "cors",
+    "regex": "(Access-Control-Allow-Origin.*\\*|origin\\s*:\\s*['\\\"]\\*['\\\"]|cors\\s*\\(\\s*\\))"
+  },
+  {
+    "id": "path-traversal",
+    "title": "Path traversal sink candidate",
+    "severity": "high",
+    "category": "path-traversal",
+    "regex": "(sendFile|readFile|createReadStream|open)\\s*\\([^\\n]*(req\\.|request\\.|params|query|body)"
+  },
+  {
+    "id": "ssrf-candidate",
+    "title": "SSRF candidate",
+    "severity": "high",
+    "category": "ssrf",
+    "regex": "(fetch|axios\\.|request\\(|http\\.get|https\\.get)\\s*\\([^\\n]*(req\\.|request\\.|params|query|body)"
+  },
+  {
+    "id": "open-redirect",
+    "title": "Open redirect candidate",
+    "severity": "medium",
+    "category": "open-redirect",
+    "regex": "(redirect|location\\.href|Location)\\s*\\([^\\n]*(req\\.|request\\.|params|query|body)"
+  },
+  {
+    "id": "weak-crypto",
+    "title": "Weak cryptographic primitive",
+    "severity": "medium",
+    "category": "weak-crypto",
+    "regex": "\\b(md5|sha1|DES|RC4)\\b"
+  },
+  {
+    "id": "debug-endpoint",
+    "title": "Debug endpoint candidate",
+    "severity": "low",
+    "category": "debug",
+    "regex": "(app\\.(get|post)|router\\.(get|post)).*['\\\"]/(debug|admin|internal|actuator)"
+  },
+  {
+    "id": "default-password",
+    "title": "Default password candidate",
+    "severity": "high",
+    "category": "secrets",
+    "regex": "(password|passwd|pwd)\\s*[:=]\\s*['\\\"](admin|password|changeme|123456)['\\\"]"
+  },
+  {
+    "id": "auth-bypass-comment",
+    "title": "Security-sensitive bypass comment",
+    "severity": "medium",
+    "category": "auth",
+    "regex": "(TODO|FIXME|HACK).*(auth|csrf|xss|sql|security|bypass|permission|tenant)"
+  },
+  {
+    "id": "php-eval",
+    "title": "PHP dynamic code execution",
+    "severity": "high",
+    "category": "code-injection",
+    "regex": "\\b(eval|assert)\\s*\\(",
+    "extensions": [
+      ".php"
+    ]
+  },
+  {
+    "id": "php-command-exec-user-input",
+    "title": "PHP command execution from user input",
+    "severity": "high",
+    "category": "command-injection",
+    "regex": "\\b(system|exec|shell_exec|passthru|proc_open|popen)\\s*\\([^\\n]*(\\$_(GET|POST|REQUEST|COOKIE|SERVER)|argv|argc)",
+    "extensions": [
+      ".php"
+    ]
+  },
+  {
+    "id": "php-file-include-user-input",
+    "title": "PHP dynamic file include from user input",
+    "severity": "high",
+    "category": "file-inclusion",
+    "regex": "\\b(include|include_once|require|require_once)\\s*\\(?\\s*[^;\\n]*(\\$_(GET|POST|REQUEST|COOKIE)|argv)",
+    "extensions": [
+      ".php"
+    ]
+  },
+  {
+    "id": "php-unserialize-user-input",
+    "title": "PHP unsafe unserialize of user input",
+    "severity": "high",
+    "category": "deserialization",
+    "regex": "\\bunserialize\\s*\\([^\\n]*(\\$_(GET|POST|REQUEST|COOKIE)|file_get_contents\\s*\\(\\s*['\\\"]php://input)",
+    "extensions": [
+      ".php"
+    ]
+  },
+  {
+    "id": "php-sql-user-input",
+    "title": "PHP SQL query built with user input",
+    "severity": "high",
+    "category": "sql-injection",
+    "regex": "\\b(mysqli_query|mysql_query|pg_query|sqlite_query|query|prepare)\\s*\\([^;\\n]*(\\$_(GET|POST|REQUEST|COOKIE)|\\.\\s*\\$|\\$\\w+\\s*\\.)",
+    "extensions": [
+      ".php"
+    ]
+  },
+  {
+    "id": "php-path-traversal-user-input",
+    "title": "PHP filesystem access from user input",
+    "severity": "high",
+    "category": "path-traversal",
+    "regex": "\\b(file_get_contents|fopen|readfile|unlink|copy|rename|ZipArchive::open)\\s*\\([^\\n]*(\\$_(GET|POST|REQUEST|COOKIE)|argv)",
+    "extensions": [
+      ".php"
+    ]
+  },
+  {
+    "id": "php-ssrf-user-input",
+    "title": "PHP outbound request from user input",
+    "severity": "high",
+    "category": "ssrf",
+    "regex": "\\b(curl_setopt|file_get_contents|fopen)\\s*\\([^\\n]*(\\$_(GET|POST|REQUEST|COOKIE)|argv|CURLOPT_URL)",
+    "extensions": [
+      ".php"
+    ]
+  },
+  {
+    "id": "php-tls-verification-disabled",
+    "title": "PHP TLS verification disabled",
+    "severity": "high",
+    "category": "transport-security",
+    "regex": "(CURLOPT_SSL_VERIFYPEER\\s*,\\s*false|CURLOPT_SSL_VERIFYHOST\\s*,\\s*0|verify_peer\\s*['\\\"]?\\s*=>\\s*false)",
+    "extensions": [
+      ".php"
+    ]
+  },
+  {
+    "id": "php-header-open-redirect",
+    "title": "PHP open redirect candidate",
+    "severity": "medium",
+    "category": "open-redirect",
+    "regex": "\\bheader\\s*\\(\\s*['\\\"]Location:\\s*['\\\"]?\\s*\\.\\s*(\\$_(GET|POST|REQUEST|COOKIE)|\\$\\w+)",
+    "extensions": [
+      ".php"
+    ]
+  },
+  {
+    "id": "ruby-eval",
+    "title": "Ruby dynamic code execution",
+    "severity": "high",
+    "category": "code-injection",
+    "regex": "\\b(eval|class_eval|instance_eval|module_eval)\\s*\\(",
+    "extensions": [
+      ".rb"
+    ]
+  },
+  {
+    "id": "ruby-command-exec-user-input",
+    "title": "Ruby command execution from user input",
+    "severity": "high",
+    "category": "command-injection",
+    "regex": "\\b(system|exec|spawn|IO\\.popen|Open3\\.(capture2|capture2e|capture3|popen3))\\s*\\([^\\n]*(params|ARGV|ENV\\[|request\\.)",
+    "extensions": [
+      ".rb"
+    ]
+  },
+  {
+    "id": "ruby-deserialization-user-input",
+    "title": "Ruby unsafe deserialization of user input",
+    "severity": "high",
+    "category": "deserialization",
+    "regex": "\\b(Marshal\\.load|YAML\\.load|Psych\\.load)\\s*\\([^\\n]*(params|ARGV|request\\.|File\\.read|Base64\\.decode64)",
+    "extensions": [
+      ".rb"
+    ]
+  },
+  {
+    "id": "rails-sql-interpolation",
+    "title": "Rails SQL interpolation candidate",
+    "severity": "high",
+    "category": "sql-injection",
+    "regex": "\\b(where|find_by_sql|execute|order|pluck)\\s*\\([^\\n]*#\\{[^\\n]*\\}",
+    "extensions": [
+      ".rb"
+    ]
+  },
+  {
+    "id": "ruby-path-traversal-user-input",
+    "title": "Ruby filesystem access from user input",
+    "severity": "high",
+    "category": "path-traversal",
+    "regex": "\\b(File\\.(read|open|write|delete|unlink)|IO\\.read|send_file)\\s*\\([^\\n]*(params|ARGV|request\\.)",
+    "extensions": [
+      ".rb"
+    ]
+  },
+  {
+    "id": "ruby-ssrf-user-input",
+    "title": "Ruby outbound request from user input",
+    "severity": "high",
+    "category": "ssrf",
+    "regex": "\\b(Net::HTTP\\.(get|get_response|post)|URI\\.open|OpenURI\\.open_uri|Faraday\\.(get|post)|HTTParty\\.(get|post))\\s*\\([^\\n]*(params|ARGV|request\\.)",
+    "extensions": [
+      ".rb"
+    ]
+  },
+  {
+    "id": "rails-open-redirect",
+    "title": "Rails open redirect candidate",
+    "severity": "medium",
+    "category": "open-redirect",
+    "regex": "\\bredirect_to\\s+[^\\n]*(params|request\\.params)",
+    "extensions": [
+      ".rb"
+    ]
+  },
+  {
+    "id": "rails-render-inline-user-input",
+    "title": "Rails inline render from user input",
+    "severity": "high",
+    "category": "xss",
+    "regex": "\\brender\\s+inline:\\s*[^\\n]*(params|request\\.params)",
+    "extensions": [
+      ".rb"
+    ]
+  },
+  {
+    "id": "cli-argv-command-sink",
+    "title": "CLI argument reaches command execution sink",
+    "severity": "high",
+    "category": "command-injection",
+    "regex": "\\b(exec|execSync|spawn|spawnSync|system|shell_exec|passthru|proc_open|popen|subprocess\\.(run|call|Popen)|os\\.system)\\s*\\([^\\n]*(argv|ARGV|process\\.argv|sys\\.argv|commander\\.|yargs\\.)",
+    "extensions": [
+      ".js",
+      ".jsx",
+      ".ts",
+      ".tsx",
+      ".py",
+      ".php",
+      ".rb"
+    ]
+  },
+  {
+    "id": "cli-argv-filesystem-sink",
+    "title": "CLI argument reaches filesystem sink",
+    "severity": "medium",
+    "category": "path-traversal",
+    "regex": "\\b(readFile|writeFile|createReadStream|open|File\\.(read|open|write|delete)|IO\\.read|file_get_contents|fopen|readfile|unlink|os\\.remove|Path\\()\\s*\\([^\\n]*(argv|ARGV|process\\.argv|sys\\.argv|commander\\.|yargs\\.)",
+    "extensions": [
+      ".js",
+      ".jsx",
+      ".ts",
+      ".tsx",
+      ".py",
+      ".php",
+      ".rb"
+    ]
+  },
+  {
+    "id": "shell-script-unsafe-eval",
+    "title": "Shell script dynamic eval usage",
+    "severity": "high",
+    "category": "command-injection",
+    "regex": "\\beval\\s+\\$",
+    "extensions": [
+      ".sh",
+      ".bash"
+    ]
+  },
+  {
+    "id": "shell-script-unquoted-args",
+    "title": "Shell script unquoted argument expansion near command",
+    "severity": "medium",
+    "category": "command-injection",
+    "regex": "\\b(rm|cp|mv|tar|curl|wget|ssh|scp|rsync)\\b[^\\n]*(\\$1|\\$2|\\$@|\\$\\*)",
+    "extensions": [
+      ".sh",
+      ".bash"
+    ]
+  },
+  {
+    "id": "insecure-file-permission",
+    "title": "Overly permissive file permission",
+    "severity": "medium",
+    "category": "misconfiguration",
+    "regex": "\\b(chmod|File\\.chmod)\\s*\\(?\\s*(777|0o777|0777|['\\\"]777['\\\"])",
+    "extensions": [
+      ".js",
+      ".jsx",
+      ".ts",
+      ".tsx",
+      ".py",
+      ".php",
+      ".rb",
+      ".sh",
+      ".bash"
+    ]
+  },
+  {
+    "id": "go-command-exec-user-input",
+    "title": "Go command execution from variable input",
+    "severity": "high",
+    "category": "command-injection",
+    "regex": "\\bexec\\.Command\\s*\\([^\\n]*(req\\.|request\\.|params|query|body|\\$|fmt\\.Sprintf|os\\.Args|flag\\.Arg)",
+    "extensions": [
+      ".go"
+    ]
+  },
+  {
+    "id": "go-sql-concat",
+    "title": "Go SQL query via string concat",
+    "severity": "high",
+    "category": "sql-injection",
+    "regex": "\\b(fmt\\.Sprintf|fmt\\.Sprintln|strings\\.Join)\\s*\\([^\\n]*(SELECT|INSERT|UPDATE|DELETE)",
+    "extensions": [
+      ".go"
+    ]
+  },
+  {
+    "id": "go-ssrf-user-input",
+    "title": "Go outbound HTTP request from user input",
+    "severity": "high",
+    "category": "ssrf",
+    "regex": "\\b(http\\.(Get|Post|Do)|net/url\\.Parse|NewRequest)\\s*\\([^\\n]*(req\\.|request\\.|params|query|body|fmt\\.Sprintf|\\+)",
+    "extensions": [
+      ".go"
+    ]
+  },
+  {
+    "id": "go-path-traversal",
+    "title": "Go filesystem access from user input",
+    "severity": "high",
+    "category": "path-traversal",
+    "regex": "\\b(os\\.(Open|ReadFile|Create|WriteFile|Remove|Stat)|ioutil\\.(ReadFile|ReadDir|WriteFile)|filepath\\.Join)\\s*\\([^\\n]*(req\\.|request\\.|params|query|body|fmt\\.Sprintf|os\\.Args)",
+    "extensions": [
+      ".go"
+    ]
+  },
+  {
+    "id": "go-html-template-xss",
+    "title": "Go template rendering unescaped HTML",
+    "severity": "high",
+    "category": "xss",
+    "regex": "template\\.(HTML|HTMLAttr|URL|JS|Srcset)\\s*\\(",
+    "extensions": [
+      ".go"
+    ]
+  },
+  {
+    "id": "c-memcpy-overflow",
+    "title": "Memory copy without bounds check",
+    "severity": "high",
+    "category": "memory-corruption",
+    "regex": "memcpy\\([^,]+,[^,]+,\\s*(strlen|sizeof\\s*\\(\\s*[a-zA-Z]|n)",
+    "extensions": [
+      ".c",
+      ".h"
+    ]
+  },
+  {
+    "id": "c-kmalloc-sizeof",
+    "title": "kmalloc with sizeof pointer instead of struct",
+    "severity": "high",
+    "category": "memory-corruption",
+    "regex": "kmalloc\\s*\\(\\s*sizeof\\s*\\(\\s*\\(",
+    "extensions": [
+      ".c",
+      ".h"
+    ]
+  },
+  {
+    "id": "c-copy-from-user",
+    "title": "copy_from_user without proper size check",
+    "severity": "high",
+    "category": "memory-corruption",
+    "regex": "copy_from_user\\s*\\([^)]+",
+    "extensions": [
+      ".c",
+      ".h"
+    ]
+  },
+  {
+    "id": "c-sprintf-usage",
+    "title": "unbounded sprintf usage (prefer snprintf)",
+    "severity": "medium",
+    "category": "buffer-overflow",
+    "regex": "sprintf\\([^)]*%s",
+    "extensions": [
+      ".c",
+      ".h"
+    ]
+  },
+  {
+    "id": "c-stack-buffer",
+    "title": "Large stack buffer allocation",
+    "severity": "medium",
+    "category": "stack-overflow",
+    "regex": "\\[\\s*[0-9]{5,}\\s*\\]",
+    "extensions": [
+      ".c",
+      ".h"
+    ]
+  },
+  {
+    "id": "c-user-pointer-deref",
+    "title": "User-controlled pointer dereference",
+    "severity": "high",
+    "category": "memory-corruption",
+    "regex": "__user\\s+\\*",
+    "extensions": [
+      ".c",
+      ".h"
+    ]
+  },
+  {
+    "id": "c-goto-bug",
+    "title": "Potential goto fail (missing cleanup)",
+    "severity": "medium",
+    "category": "resource-leak",
+    "regex": "goto\\s+out\\s*;\\s*\\n[^}]*\\n\\s*return",
+    "extensions": [
+      ".c",
+      ".h"
+    ]
+  },
+  {
+    "id": "c-unchecked-alloc",
+    "title": "Unchecked allocation return value",
+    "severity": "high",
+    "category": "null-deref",
+    "regex": "(kmalloc|kzalloc|kcalloc|vmalloc)\\s*\\([^)]*\\)\\s*;\\s*\\n(?!\\s*if)",
+    "extensions": [
+      ".c",
+      ".h"
+    ]
+  },
+  {
+    "id": "c-proc-entry-create",
+    "title": "/proc file creation without proper permissions",
+    "severity": "medium",
+    "category": "information-disclosure",
+    "regex": "proc_create\\s*\\([^)]*0444",
+    "extensions": [
+      ".c",
+      ".h"
+    ]
+  },
+  {
+    "id": "c-debugfs-create",
+    "title": "debugfs file creation (exposed to userspace)",
+    "severity": "low",
+    "category": "information-disclosure",
+    "regex": "debugfs_create_",
+    "extensions": [
+      ".c",
+      ".h"
+    ]
+  }
 ]

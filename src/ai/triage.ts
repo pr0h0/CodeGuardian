@@ -80,7 +80,7 @@ export async function aiTriage(
       let checked = aiFindingSchema.safeParse(parsed);
       if (!checked.success) {
         log(`ai: triage ${label} schema invalid, repairing`);
-        const repair = await withTimeout((repairProvider ?? provider).complete({ system: "Repair invalid JSON to match requested schema. Output raw JSON only. No prose, markdown, comments, code fences, or extra keys. Use only enum values allowed by schema.", messages: [{ role: "user", content: output.text }], jsonSchema: aiFindingJsonSchema, temperature: 0, maxTokens: 2500 }), 120_000, "AI JSON repair request timed out after 120s");
+        const repair = await withTimeout((repairProvider ?? provider).complete({ system: "Repair invalid JSON to match requested schema. Output raw JSON only. No prose, markdown, comments, code fences, or extra keys. Use only enum values allowed by schema.", messages: [{ role: "user", content: output.text }], jsonSchema: aiFindingJsonSchema, temperature: 0, maxTokens: 2000 }), 120_000, "AI JSON repair request timed out after 120s");
         log(`ai: triage ${label} repair response chars=${repair.text.length}`);
         parsed = normalizeAiFindingJson(safeJsonParse(repair.text));
         checked = aiFindingSchema.safeParse(parsed);
