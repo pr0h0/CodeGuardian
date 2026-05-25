@@ -342,7 +342,7 @@ describe("report", () => {
     const content = fs.readFileSync(file, "utf8");
     expect(file.endsWith(".html")).toBe(true);
     expect(content).toContain("<!doctype html>");
-    expect(content).toContain("Codeguardian Security Report");
+    expect(content).toContain("CodeGuardian Security Report");
     expect(content).toContain("id=\"search\"");
     expect(content).toContain("Command injection");
     expect(content).toContain("Additional SAST Findings");
@@ -350,7 +350,7 @@ describe("report", () => {
     expect(content).toContain("0.000100");
   });
 
-  it("keeps html report headers in normal document flow", () => {
+  it("renders html with sticky header for navigation", () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cg-"));
     const file = writeHtmlReport(dir, {
       scan: { id: "1", repo_path: ".", status: "completed" },
@@ -368,7 +368,7 @@ describe("report", () => {
     });
 
     const content = fs.readFileSync(file, "utf8");
-    expect(content).not.toMatch(/header\s*\{[^}]*position\s*:/);
+    expect(content).toMatch(/header\s*\{[^}]*position\s*:\s*sticky/);
     expect(content).not.toMatch(/th\s*\{[^}]*position\s*:/);
     expect(content).not.toMatch(/th\s*\{[^}]*top\s*:/);
   });

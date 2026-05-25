@@ -35,6 +35,8 @@ function addScanOptions(command: Command): Command {
     .option("--profile <profile>", "all|web|cli|php|ruby|rails|laravel|node|python")
     .option("--incremental", "only run local deterministic scanners on changed files; external Docker scanners still scan full repo")
     .option("--fail-on <severity>", "critical|high|medium|low|none", "none")
+    .option("--ci", "CI mode: output GitHub Actions annotations and machine-readable summary")
+    .option("--diff [ref]", "scan only files changed in git vs HEAD or specified ref")
     .option("--verbose", "verbose logging");
 }
 

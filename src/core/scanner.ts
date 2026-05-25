@@ -1,5 +1,6 @@
 import path from "node:path";
 import fs from "node:fs";
+import { execSync } from "node:child_process";
 import { openDatabase } from "../db/database.js";
 import { createScan, finishScan, getScanBundle, insertFinding, insertScannerResult, insertScannerRun } from "../db/repositories.js";
 import { indexRepository } from "../repo/repoIndexer.js";
@@ -94,43 +95,40 @@ export async function runScan(ctx: RunContext): Promise<{ scanId: string; report
   for (const tool of toolStatuses) ctx.logger.info(`tools: ${tool.name} ${tool.available ? "available" : "missing"}`);
   try {
     ctx.logger.info("indexing repository");
-    const files = indexRepository(db, scanId, ctx.repoPath, {
+    let include = ctx.options.include;
+    let diffFiles: string[] | undefined;
+    if (ctx.options.diff !== undefined) {
+      diffFiles = getGitDiffFiles(ctx.repoPath, typeof ctx.options.diff === "string" ? ctx.options.diff : undefined);
+      ctx.logger.info(`diff: ${diffFiles.length} files changed since ${typeof ctx.options.diff === "string" ? ctx.options.diff : "HEAD"}`);
+      include = diffFiles.length ? [...(ctx.options.include ?? []), ...diffFiles] : ["__codeguardian_no_changed_files__"];
+    }
+    const allFiles = indexRepository(db, scanId, ctx.repoPath, {
       maxFiles: ctx.options.maxFiles,
       maxFileSize: ctx.options.maxFileSize,
-      include: ctx.options.include,
+      include,
       exclude: ctx.options.exclude
     });
-    ctx.logger.info(`index: indexed ${files.length} files`);
+    ctx.logger.info(`index: indexed ${allFiles.length} files`);
     const aiInstructions = loadAiInstructions(ctx.repoPath);
     const strategyInstructions = buildScanStrategyInstructions(ctx.projectConfig);
     const effectiveAiInstructions = combineAiInstructions(aiInstructions.content, strategyInstructions);
     if (aiInstructions.path) ctx.logger.info(`ai-instructions: loaded ${aiInstructions.path} chars=${aiInstructions.chars}`);
     if (strategyInstructions) ctx.logger.info("scan-strategy: AI steering enabled from project config");
-    const scanPlan = buildScanPlan(db, ctx.repoPath, files, { incremental: ctx.options.incremental });
-    persistScanPlanCache(db, ctx.repoPath, files);
+    const scanPlan = buildScanPlan(db, ctx.repoPath, allFiles, { incremental: ctx.options.incremental });
+    persistScanPlanCache(db, ctx.repoPath, allFiles);
     const localFiles = scanPlan.localFiles;
     if (ctx.options.incremental) ctx.logger.info(`incremental: changed files=${scanPlan.changedPaths.size} localScannerFiles=${localFiles.length}`);
-    ctx.logger.info("scanners: running custom rules");
-    const customResults = runCustomRules(localFiles);
-    ctx.logger.info(`scanners: custom rules produced ${customResults.length} results`);
-    ctx.logger.info("scanners: running source-pattern checks");
-    const sourcePatternResults = runSourcePatternChecks(localFiles);
-    ctx.logger.info(`scanners: source-pattern checks produced ${sourcePatternResults.length} results`);
-    ctx.logger.info("scanners: running taint-lite");
-    const taintResults = runTaintLite(localFiles);
-    ctx.logger.info(`scanners: taint-lite produced ${taintResults.length} results`);
-    ctx.logger.info("scanners: running taint-flow");
-    const taintFlowResults = runTaintFlow(localFiles);
-    ctx.logger.info(`scanners: taint-flow produced ${taintFlowResults.length} results`);
-    ctx.logger.info("scanners: running business invariant checks");
-    const businessInvariantResults = runBusinessInvariantChecks(localFiles);
-    ctx.logger.info(`scanners: business invariant checks produced ${businessInvariantResults.length} results`);
-    ctx.logger.info("scanners: running config checks");
-    const configResults = runConfigChecks(localFiles);
-    ctx.logger.info(`scanners: config checks produced ${configResults.length} results`);
-    ctx.logger.info("scanners: running quality checks");
-    const qualityResults = runQualityChecks(localFiles);
-    ctx.logger.info(`scanners: quality checks produced ${qualityResults.length} results`);
+    ctx.logger.info("scanners: running local scanners in parallel");
+    const localScannerJobs = [
+      Promise.resolve().then(() => { const r = runCustomRules(localFiles); ctx.logger.info(`scanners: custom rules produced ${r.length} results`); return r; }),
+      Promise.resolve().then(() => { const r = runSourcePatternChecks(localFiles); ctx.logger.info(`scanners: source-pattern checks produced ${r.length} results`); return r; }),
+      Promise.resolve().then(() => { const r = runTaintLite(localFiles); ctx.logger.info(`scanners: taint-lite produced ${r.length} results`); return r; }),
+      Promise.resolve().then(() => { const r = runTaintFlow(localFiles); ctx.logger.info(`scanners: taint-flow produced ${r.length} results`); return r; }),
+      Promise.resolve().then(() => { const r = runBusinessInvariantChecks(localFiles); ctx.logger.info(`scanners: business invariant checks produced ${r.length} results`); return r; }),
+      Promise.resolve().then(() => { const r = runConfigChecks(localFiles); ctx.logger.info(`scanners: config checks produced ${r.length} results`); return r; }),
+      Promise.resolve().then(() => { const r = runQualityChecks(localFiles); ctx.logger.info(`scanners: quality checks produced ${r.length} results`); return r; })
+    ];
+    const [customResults, sourcePatternResults, taintResults, taintFlowResults, businessInvariantResults, configResults, qualityResults] = await Promise.all(localScannerJobs);
     ctx.logger.info("scanners: running external scanners");
     const scannerJobs = [
       runLoggedScanner(ctx, db, scanId, "semgrep", () => runSemgrep(ctx.repoPath, scannerTimeout(ctx, "semgrep"))),
@@ -155,14 +153,14 @@ export async function runScan(ctx: RunContext): Promise<{ scanId: string; report
       ...externalResults
     ];
     ctx.logger.info("scanners: running compliance checks");
-    const complianceResults = runComplianceChecks(files, preliminaryScannerResults);
+    const complianceResults = runComplianceChecks(allFiles, preliminaryScannerResults);
     ctx.logger.info(`scanners: compliance checks produced ${complianceResults.length} results`);
     ctx.logger.info("scanners: running correlation checks");
-    const correlationResults = runCorrelationChecks(files, preliminaryScannerResults);
+    const correlationResults = runCorrelationChecks(allFiles, preliminaryScannerResults);
     ctx.logger.info(`scanners: correlation checks produced ${correlationResults.length} results`);
     const rawScannerResults = [...preliminaryScannerResults, ...complianceResults, ...correlationResults];
     const configuredResults = applyProjectPolicy(rawScannerResults, ctx);
-    const suppressed = applySuppressions(ctx.repoPath, files, configuredResults);
+    const suppressed = applySuppressions(ctx.repoPath, allFiles, configuredResults);
     if (suppressed.summary.suppressed) ctx.logger.info(`suppressions: removed ${suppressed.summary.suppressed} results`);
     const noiseReducedResults = reduceScannerResultNoise(suppressed.results);
     if (noiseReducedResults.length !== suppressed.results.length) ctx.logger.info(`noise: collapsed ${suppressed.results.length - noiseReducedResults.length} duplicate scanner results`);
@@ -182,7 +180,7 @@ export async function runScan(ctx: RunContext): Promise<{ scanId: string; report
       ? await runAiTriageBatches({
         providers: aiProviders,
         candidates: triageCandidates,
-        files,
+        files: allFiles,
         scannerResults,
         aiInstructions: effectiveAiInstructions,
         maxContextChars: ctx.env.CODEGUARDIAN_MAX_CONTEXT_CHARS,
@@ -196,7 +194,7 @@ export async function runScan(ctx: RunContext): Promise<{ scanId: string; report
     if (aiBudget.triagedScannerResults) ctx.logger.info(`ai-budget: triaged=${aiBudget.triagedScannerResults} context chars=${aiBudget.triageContextChars} estimatedTokens=${aiBudget.estimatedTriageTokens}`);
     if (aiProviders && ctx.options.aiAudit) {
       ctx.logger.info(`ai-audit: enabled maxFiles=${ctx.options.maxAiAuditFiles} maxRounds=${ctx.options.maxAiAuditRounds} maxChars=${ctx.options.maxAiAuditChars}`);
-      const auditFindings = await runTargetedExploratoryAudit(aiProviders.medium, files, scannerResults, {
+      const auditFindings = await runTargetedExploratoryAudit(aiProviders.medium, allFiles, scannerResults, {
         maxFiles: ctx.options.maxAiAuditFiles,
         maxRounds: ctx.options.maxAiAuditRounds,
         maxChars: ctx.options.maxAiAuditChars,
@@ -218,7 +216,7 @@ export async function runScan(ctx: RunContext): Promise<{ scanId: string; report
     } else if (aiProviders) {
       ctx.logger.info("ai-audit: disabled");
     }
-    const rememberedFindings = applyTriageMemory(db, ctx.repoPath, scanId, attachFindingFingerprints(findings.map(classifyFindingState)), files)
+    const rememberedFindings = applyTriageMemory(db, ctx.repoPath, scanId, attachFindingFingerprints(findings.map(classifyFindingState)), allFiles)
       .map((finding) => ({ ...finding, exploitabilityScore: localExploitabilityScore(finding) }));
     const deterministicFindings = dedupeFindings(rememberedFindings);
     if (deterministicFindings.length !== rememberedFindings.length) ctx.logger.info(`noise: collapsed ${rememberedFindings.length - deterministicFindings.length} duplicate findings`);
@@ -232,15 +230,16 @@ export async function runScan(ctx: RunContext): Promise<{ scanId: string; report
     ctx.logger.info("db: marking scan completed");
     finishScan(db, scanId, "completed");
     const baselineDiff = buildBaselineDiff(db, ctx.repoPath, scanId, ctx.options.baseline);
-    const securityIntelligence = buildSecurityIntelligence(files, scannerResults, {
+    const securityIntelligence = buildSecurityIntelligence(allFiles, scannerResults, {
       negativeEvidence: [...negativeEvidence, ...rejectedHypothesesEvidence(auditArtifacts)],
       aiSourceMap,
       auditArtifacts
     });
-    const bundle = prepareReportBundle({ ...getScanBundle(db, scanId), toolStatuses, baselineDiff, suppressions: suppressed.summary, aiBudget, aiUsage: aiUsageTracker.summary(), aiJobs: aiJobRecorder.summary(), aiInstructions: { path: aiInstructions.path, chars: effectiveAiInstructions.length, loaded: Boolean(aiInstructions.path || strategyInstructions) }, projectConfig: ctx.projectConfig, scanStrategy: scanStrategyMetadata(ctx.projectConfig), securityIntelligence, incremental: { enabled: ctx.options.incremental, changedFiles: scanPlan.changedPaths.size, localScannerFiles: localFiles.length } }, files);
+    const bundle = prepareReportBundle({ ...getScanBundle(db, scanId), toolStatuses, baselineDiff, suppressions: suppressed.summary, aiBudget, aiUsage: aiUsageTracker.summary(), aiJobs: aiJobRecorder.summary(), aiInstructions: { path: aiInstructions.path, chars: effectiveAiInstructions.length, loaded: Boolean(aiInstructions.path || strategyInstructions) }, projectConfig: ctx.projectConfig, scanStrategy: scanStrategyMetadata(ctx.projectConfig), securityIntelligence, incremental: { enabled: ctx.options.incremental, changedFiles: scanPlan.changedPaths.size, localScannerFiles: localFiles.length } }, allFiles);
     ctx.logger.info(`reports: writing format=${ctx.options.format} out=${ctx.outDir}`);
     const reportFiles = writeReports(ctx.outDir, ctx.options.format, bundle, warnings);
     for (const file of reportFiles) ctx.logger.info(`reports: wrote ${file}`);
+    if (ctx.options.ci) emitCiAnnotations(finalFindings, ctx.options.failOn);
     return { scanId, reportFiles, warnings, exitCode: failExitCode(finalFindings, ctx.options.failOn) };
   } catch (error) {
     ctx.logger.error(`scan failed: ${error instanceof Error ? error.message : String(error)}`);
@@ -300,17 +299,39 @@ async function runAiTriageBatches(input: {
       input.aiBudget.triageContextChars += JSON.stringify(contextPack).length;
       input.aiBudget.triagedScannerResults += 1;
       const tier = selectAiTriageTier(result);
-      input.log(`triage: model tier=${tier} score=${scoreScannerResult(result)} ${result.scanner}/${result.ruleId} ${result.path ?? ""}:${result.startLine ?? ""}`);
-      findings.push(...await aiTriage(
-        input.providers[tier],
-        [contextPack],
-        input.log,
-        input.providers.critic,
-        resolveRequestedContext,
-        [formatTriageLabel(result, absoluteIndex, input.candidates.length)],
-        input.providers.low,
-        input.aiJobRecorder
-      ));
+      const useCritic = input.providers.critic && (result.severity === "critical" || result.severity === "high");
+      input.log(`triage: model tier=${tier} score=${scoreScannerResult(result)} critic=${useCritic ? "yes" : "skip"} ${result.scanner}/${result.ruleId} ${result.path ?? ""}:${result.startLine ?? ""}`);
+      const provider = input.providers[tier];
+      try {
+        findings.push(...await aiTriage(
+          provider,
+          [contextPack],
+          input.log,
+          useCritic ? input.providers.critic : undefined,
+          resolveRequestedContext,
+          [formatTriageLabel(result, absoluteIndex, input.candidates.length)],
+          input.providers.low,
+          input.aiJobRecorder
+        ));
+      } catch (error) {
+        if (tier !== "low") {
+          const fallbackTier = tier === "high" ? "medium" : "low";
+          input.log(`triage: ${tier} failed, falling back to ${fallbackTier}: ${error instanceof Error ? error.message : String(error)}`);
+          const fallbackProvider = input.providers[fallbackTier];
+          findings.push(...await aiTriage(
+            fallbackProvider,
+            [contextPack],
+            input.log,
+            undefined,
+            resolveRequestedContext,
+            [formatTriageLabel(result, absoluteIndex, input.candidates.length)],
+            input.providers.low,
+            input.aiJobRecorder
+          ));
+        } else {
+          throw error;
+        }
+      }
     }
     if (input.targetActiveFindings > 0 && activeFindingCount(findings) >= input.targetActiveFindings) {
       input.log(`triage: target active code findings reached ${activeFindingCount(findings)}/${input.targetActiveFindings}`);
@@ -511,4 +532,33 @@ function rejectedHypothesesEvidence(events: AiAuditArtifactEvent[]): Array<{ tit
       status: "rejected_hypothesis"
     }))
     : []);
+}
+
+/** Output GitHub Actions annotations for findings matching the failOn threshold. */
+function emitCiAnnotations(findings: Array<{ path?: string | null; startLine?: number | null; title: string; severity: string; category: string; reasoning: string; status?: string | null }>, failOn: string): void {
+  const threshold = failOn === "none" ? SEVERITY_ORDER.length - 1 : SEVERITY_ORDER.indexOf(failOn as any);
+  for (const finding of findings) {
+    if (finding.status === "false_positive") continue;
+    const findingLevel = SEVERITY_ORDER.indexOf(finding.severity as any);
+    if (findingLevel > threshold) continue;
+    const file = finding.path ?? "";
+    const line = finding.startLine ?? 1;
+    const title = `[${finding.severity}] ${finding.category}: ${finding.title}`;
+    const message = finding.reasoning.slice(0, 500).replace(/\n/g, "%0A");
+    // GitHub Actions annotation format
+    console.log(`::error file=${file},line=${line},title=${title}::${message}`);
+  }
+  const summaryLine = findings.filter((f) => !f.status || f.status !== "false_positive").length;
+  console.log(`::notice::CodeGuardian scan complete: ${summaryLine} findings (fail-on: ${failOn})`);
+}
+
+/** Get files changed in git vs HEAD or a specific ref. Returns relative paths. */
+export function getGitDiffFiles(repoPath: string, ref?: string): string[] {
+  try {
+    const target = typeof ref === "string" && ref ? ref : "HEAD";
+    const output = execSync(`git -C "${repoPath}" diff --name-only ${target}`, { encoding: "utf8", timeout: 30_000 });
+    return output.split(/\r?\n/).filter(Boolean);
+  } catch {
+    return [];
+  }
 }

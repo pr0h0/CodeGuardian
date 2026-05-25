@@ -16,6 +16,8 @@ export function writeHtmlReport(outDir: string, bundle: any, warnings: string[] 
   const compliance = scanner.filter((item: Row) => item.scanner === "compliance");
   const attackChains = scanner.filter((item: Row) => item.scanner === "correlation");
   const additionalSast = additionalSastRows(scanner, activeFindings, falsePositives);
+  const healthScore = computeHealthScore(activeFindings);
+  const groupedBySeverity = countBy(activeFindings, "severity");
   const html = renderDocument({
     repoPath,
     scan: bundle.scan ?? {},
@@ -28,11 +30,26 @@ export function writeHtmlReport(outDir: string, bundle: any, warnings: string[] 
     scanner,
     files: bundle.files ?? [],
     aiUsage: bundle.aiUsage ?? [],
-    warnings
+    warnings,
+    healthScore,
+    groupedBySeverity
   });
   const file = path.join(outDir, `${reportBase}.html`);
   fs.writeFileSync(file, html);
   return file;
+}
+
+function computeHealthScore(findings: Row[]): number {
+  if (!findings.length) return 100;
+  const severityWeights: Record<string, number> = { critical: 40, high: 20, medium: 8, low: 2, info: 1 };
+  const statusBonuses: Record<string, number> = { confirmed_true_positive: 1.5, likely_true_positive: 1.2, suspected: 0.8, security_hotspot: 0.5 };
+  let score = 100;
+  for (const f of findings) {
+    const weight = severityWeights[f.severity] ?? 5;
+    const bonus = statusBonuses[f.status] ?? 1;
+    score -= weight * bonus;
+  }
+  return Math.max(0, Math.round(score));
 }
 
 function renderDocument(input: {
@@ -48,62 +65,143 @@ function renderDocument(input: {
   files: Row[];
   aiUsage: Row[];
   warnings: string[];
+  healthScore: number;
+  groupedBySeverity: Record<string, number>;
 }): string {
-  const severityCounts = countBy(input.activeFindings, "severity");
+  const severityCounts = input.groupedBySeverity;
   const aiRequests = input.aiUsage.reduce((sum, row) => sum + Number(row.requests ?? 0), 0);
+  const criticalHigh = (severityCounts.critical ?? 0) + (severityCounts.high ?? 0);
+  const severityBars = severityChartSvg(severityCounts);
   return `<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Codeguardian Security Report</title>
+  <title>CodeGuardian Security Report</title>
   <style>
-    :root { color-scheme: light dark; --bg:#0f172a; --panel:#111827; --muted:#94a3b8; --text:#e5e7eb; --line:#334155; --accent:#38bdf8; --high:#fb7185; --med:#fbbf24; --low:#60a5fa; --ok:#34d399; }
+    :root { color-scheme: light dark; --bg:#0f172a; --panel:#111827; --muted:#94a3b8; --text:#e5e7eb; --line:#334155; --accent:#38bdf8; --critical:#fb7185; --high:#fbbf24; --medium:#60a5fa; --low:#94a3b8; --info:#6b7280; --ok:#34d399; --chart-height:160px; }
+    * { box-sizing:border-box; }
     body { margin:0; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif; background:var(--bg); color:var(--text); }
-    header { padding:24px 32px; border-bottom:1px solid var(--line); background:rgba(15,23,42,.96); backdrop-filter: blur(8px); }
-    h1 { margin:0 0 10px; font-size:24px; }
-    h2 { margin:0; font-size:18px; }
-    main { padding:24px 32px 48px; max-width:1500px; margin:0 auto; }
-    .toolbar { display:flex; gap:12px; flex-wrap:wrap; align-items:center; margin-top:14px; }
-    input, select { background:#020617; color:var(--text); border:1px solid var(--line); border-radius:6px; padding:8px 10px; }
-    .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:12px; margin:18px 0; }
+    header { padding:24px 32px 16px; border-bottom:1px solid var(--line); background:rgba(15,23,42,.96); backdrop-filter: blur(8px); position:sticky; top:0; z-index:10; }
+    h1 { margin:0 0 4px; font-size:22px; display:flex; align-items:center; gap:10px; }
+    h2 { margin:0; font-size:16px; color:var(--muted); font-weight:400; }
+    main { padding:20px 32px 48px; max-width:1500px; margin:0 auto; }
+    .toolbar { display:flex; gap:10px; flex-wrap:wrap; align-items:center; margin-top:12px; }
+    input, select { background:#020617; color:var(--text); border:1px solid var(--line); border-radius:6px; padding:7px 10px; font-size:13px; }
+    input:focus, select:focus { outline:none; border-color:var(--accent); }
+    .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); gap:10px; margin:16px 0; }
     .metric, details { background:var(--panel); border:1px solid var(--line); border-radius:8px; }
-    .metric { padding:14px; }
-    .metric strong { display:block; font-size:26px; }
-    details { margin:16px 0; overflow:hidden; }
-    summary { cursor:pointer; padding:14px 16px; font-weight:700; border-bottom:1px solid var(--line); }
+    .metric { padding:12px; }
+    .metric span { display:block; font-size:12px; color:var(--muted); margin-bottom:2px; }
+    .metric strong { display:block; font-size:24px; font-weight:700; }
+    details { margin:12px 0; overflow:hidden; }
+    summary { cursor:pointer; padding:12px 16px; font-weight:600; border-bottom:1px solid var(--line); font-size:14px; user-select:none; }
     details:not([open]) summary { border-bottom:0; }
-    .section-body { padding:16px; }
+    .section-body { padding:14px; }
     table { width:100%; border-collapse:collapse; font-size:13px; }
-    th, td { text-align:left; vertical-align:top; border-bottom:1px solid var(--line); padding:9px 8px; }
-    th { color:#cbd5e1; background:var(--panel); }
-    .card { border:1px solid var(--line); border-radius:8px; padding:14px; margin:12px 0; background:#0b1220; }
-    .meta { color:var(--muted); font-size:12px; display:flex; gap:10px; flex-wrap:wrap; }
-    .badge { border-radius:999px; padding:2px 8px; font-size:12px; border:1px solid var(--line); }
-    .critical,.high { color:var(--high); } .medium { color:var(--med); } .low,.info { color:var(--low); } .confirmed_true_positive,.confirmed { color:var(--ok); }
-    pre { overflow:auto; background:#020617; border:1px solid var(--line); border-radius:6px; padding:12px; }
+    th, td { text-align:left; vertical-align:top; border-bottom:1px solid var(--line); padding:8px; }
+    th { color:#cbd5e1; background:var(--panel); font-weight:600; white-space:nowrap; }
+    tr:hover td { background:rgba(56,189,248,.04); }
+    .card { border:1px solid var(--line); border-radius:8px; padding:14px; margin:10px 0; background:#0b1220; }
+    .card:hover { border-color:var(--accent); }
+    .meta { color:var(--muted); font-size:12px; display:flex; gap:8px; flex-wrap:wrap; }
+    .badge { border-radius:999px; padding:2px 8px; font-size:11px; border:1px solid var(--line); font-weight:500; }
+    .critical,.badge.critical { color:var(--critical); border-color:var(--critical); }
+    .high,.badge.high { color:var(--high); border-color:var(--high); }
+    .medium,.badge.medium { color:var(--medium); border-color:var(--medium); }
+    .low,.badge.low { color:var(--low); }
+    .info,.badge.info { color:var(--info); }
+    .badge.ok { color:var(--ok); border-color:var(--ok); }
+    pre { overflow:auto; background:#020617; border:1px solid var(--line); border-radius:6px; padding:12px; font-size:12px; line-height:1.5; }
     a { color:var(--accent); }
     .hidden { display:none !important; }
+
+    /* Health score ring */
+    .health-ring { width:80px; height:80px; position:relative; }
+    .health-ring svg { transform:rotate(-90deg); }
+    .health-ring .bg { fill:none; stroke:var(--line); stroke-width:6; }
+    .health-ring .arc { fill:none; stroke-width:6; stroke-linecap:round; transition:stroke-dashoffset .6s ease; }
+    .health-ring .label { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; font-size:20px; font-weight:700; }
+
+    /* Severity chart */
+    .sev-chart { display:flex; align-items:flex-end; gap:6px; height:var(--chart-height); padding:6px 0; }
+    .sev-bar { flex:1; border-radius:4px 4px 0 0; min-height:4px; position:relative; transition:opacity .2s; cursor:pointer; }
+    .sev-bar:hover { opacity:.8; }
+    .sev-bar .count { position:absolute; top:-18px; left:50%; transform:translateX(-50%); font-size:11px; font-weight:600; }
+    .sev-bar.critical { background:var(--critical); }
+    .sev-bar.high { background:var(--high); }
+    .sev-bar.medium { background:var(--medium); }
+    .sev-bar.low { background:var(--low); }
+    .sev-bar.info { background:var(--info); }
+    .sev-legend { display:flex; gap:14px; justify-content:center; font-size:11px; margin-top:6px; }
+    .sev-legend span { display:flex; align-items:center; gap:4px; }
+    .sev-legend .dot { width:8px; height:8px; border-radius:50%; display:inline-block; }
+
+    /* Two-column display for summary */
+    .summary-row { display:flex; gap:24px; align-items:center; flex-wrap:wrap; margin:14px 0; }
+    .summary-row .chart-area { flex: 1; min-width:200px; }
+
+    @media print { header { position:static; } .toolbar,.sev-chart { break-inside:avoid; } }
   </style>
 </head>
 <body>
   <header>
-    <h1>Codeguardian Security Report</h1>
+    <h1>CodeGuardian Security Report <span style="font-size:14px;font-weight:400;color:var(--muted)">${esc(input.scan.id ?? "").slice(0,12)}</span></h1>
     <div class="meta">
-      <span>Scan: ${esc(input.scan.id ?? "unknown")}</span>
-      <span>Repo: ${esc(input.repoPath || "unknown")}</span>
+      <span>${esc(input.repoPath || "unknown")}</span>
       <span>Status: ${esc(input.scan.status ?? "unknown")}</span>
+      <span>&middot; ${formatDate(input.scan.started_at)}</span>
     </div>
     <div class="toolbar">
-      <input id="search" type="search" placeholder="Search title, path, rule, reason">
+      <input id="search" type="search" placeholder="Search title, path, rule, reason..." style="flex:1;min-width:180px">
       <select id="severity"><option value="">All severities</option><option>critical</option><option>high</option><option>medium</option><option>low</option><option>info</option></select>
-      <select id="status"><option value="">All statuses</option><option>confirmed_true_positive</option><option>likely_true_positive</option><option>security_hotspot</option><option>needs_context</option><option>suspected</option><option>false_positive</option><option>pass</option><option>fail</option><option>unknown</option></select>
+      <select id="status"><option value="">All statuses</option><option>confirmed_true_positive</option><option>likely_true_positive</option><option>security_hotspot</option><option>needs_context</option><option>suspected</option><option>false_positive</option></select>
+      <select id="viewMode">
+        <option value="cards">Card view</option>
+        <option value="table">Table view</option>
+      </select>
+      <button onclick="window.print()" style="background:var(--accent);color:#020617;border:none;border-radius:6px;padding:7px 14px;font-size:13px;cursor:pointer;font-weight:600">Print / PDF</button>
     </div>
   </header>
   <main>
+    <!-- Executive summary -->
+    <div class="summary-row">
+      <div class="health-ring">
+        <svg width="80" height="80" viewBox="0 0 80 80">
+          <circle class="bg" cx="40" cy="40" r="34"/>
+          <circle class="arc" cx="40" cy="40" r="34" stroke="${healthColor(input.healthScore)}" stroke-dasharray="213.6" stroke-dashoffset="${213.6 * (1 - input.healthScore / 100)}"/>
+        </svg>
+        <div class="label" style="color:${healthColor(input.healthScore)}">${input.healthScore}</div>
+      </div>
+      <div style="flex:2;min-width:200px">
+        <div style="font-size:13px;color:var(--muted);margin-bottom:4px">Health Score &mdash; ${healthLabel(input.healthScore)}</div>
+        <div style="font-size:13px;line-height:1.6">
+          <strong>${input.activeFindings.length}</strong> code findings
+          &middot; <strong style="color:var(--critical)">${severityCounts.critical ?? 0}</strong> critical
+          &middot; <strong style="color:var(--high)">${severityCounts.high ?? 0}</strong> high
+          &middot; <strong>${input.dependencies.length}</strong> dependency issues
+          &middot; <strong>${input.attackChains.length}</strong> attack chains
+          &middot; <strong>${input.additionalSast.length}</strong> additional SAST
+        </div>
+      </div>
+    </div>
+
+    <!-- Severity distribution chart -->
+    <div class="chart-area">
+      <div class="sev-chart">${severityBars}</div>
+      <div class="sev-legend">
+        <span><span class="dot" style="background:var(--critical)"></span> Critical (${severityCounts.critical ?? 0})</span>
+        <span><span class="dot" style="background:var(--high)"></span> High (${severityCounts.high ?? 0})</span>
+        <span><span class="dot" style="background:var(--medium)"></span> Medium (${severityCounts.medium ?? 0})</span>
+        <span><span class="dot" style="background:var(--low)"></span> Low (${severityCounts.low ?? 0})</span>
+        <span><span class="dot" style="background:var(--info)"></span> Info (${severityCounts.info ?? 0})</span>
+      </div>
+    </div>
+
+    <!-- Metrics grid -->
     <div class="grid">
       ${metric("Code Findings", input.activeFindings.length)}
-      ${metric("Critical/High", (severityCounts.critical ?? 0) + (severityCounts.high ?? 0))}
+      ${metric("Critical/High", criticalHigh)}
       ${metric("Additional SAST", input.additionalSast.length)}
       ${metric("Dependencies", input.dependencies.length)}
       ${metric("Attack Chains", input.attackChains.length)}
@@ -112,9 +210,11 @@ function renderDocument(input: {
       ${metric("Indexed Files", input.files.filter((file) => file.indexed).length)}
       ${metric("AI Requests", aiRequests)}
     </div>
+
+    <!-- Sections -->
     ${section("Fix First", renderFixFirst(input.activeFindings), true)}
-    ${section("Attack Chains", renderAttackChainTable(input.attackChains), true)}
-    ${section("Code Findings", renderFindings(input.repoPath, input.activeFindings), true)}
+    ${section("Attack Chains", renderAttackChainTable(input.attackChains), criticalHigh > 0)}
+    ${section("Code Findings", `<div id="findings-container">${renderFindings(input.repoPath, input.activeFindings)}</div>`, true)}
     ${section("Additional SAST Findings", renderAdditionalSastTable(input.additionalSast), false)}
     ${section("Dependency Findings", renderDependencyTable(input.dependencies), false)}
     ${section("Compliance Evidence", renderComplianceTable(input.compliance), false)}
@@ -127,20 +227,80 @@ function renderDocument(input: {
     const search = document.querySelector('#search');
     const severity = document.querySelector('#severity');
     const status = document.querySelector('#status');
+    const viewMode = document.querySelector('#viewMode');
+    const container = document.querySelector('#findings-container');
+
     function applyFilters() {
-      const q = search.value.toLowerCase();
+      const q = search.value.toLowerCase().trim();
       const sev = severity.value;
       const stat = status.value;
       document.querySelectorAll('[data-row]').forEach((el) => {
         const text = el.textContent.toLowerCase();
-        const ok = (!q || text.includes(q)) && (!sev || el.dataset.severity === sev) && (!stat || el.dataset.status === stat);
+        const ok = (!q || text.includes(q))
+          && (!sev || el.dataset.severity === sev)
+          && (!stat || el.dataset.status === stat);
         el.classList.toggle('hidden', !ok);
       });
+      // Update count
+      const visible = document.querySelectorAll('[data-row]:not(.hidden)').length;
+      const total = document.querySelectorAll('[data-row]').length;
+      const count = document.getElementById('filter-count');
+      if (count) count.textContent = visible === total ? String(total) : visible + '/' + total;
     }
+
     [search, severity, status].forEach((el) => el.addEventListener('input', applyFilters));
+    applyFilters();
+
+    // View mode toggle (simple swap between cards and table view)
+    if (viewMode) {
+      viewMode.addEventListener('change', () => {
+        container.classList.toggle('table-mode', viewMode.value === 'table');
+      });
+    }
+
+    // Keyboard shortcuts
+    document.addEventListener('keydown', (e) => {
+      if (e.key === '/' && !e.ctrlKey && !e.metaKey && document.activeElement !== search) {
+        e.preventDefault();
+        search.focus();
+      }
+      if (e.key === 'Escape' && document.activeElement === search) {
+        search.value = '';
+        applyFilters();
+        search.blur();
+      }
+    });
   </script>
 </body>
 </html>`;
+}
+
+function healthColor(score: number): string {
+  if (score >= 80) return "#34d399";
+  if (score >= 50) return "#fbbf24";
+  if (score >= 30) return "#fb923c";
+  return "#fb7185";
+}
+
+function healthLabel(score: number): string {
+  if (score >= 80) return "Good";
+  if (score >= 50) return "Fair";
+  if (score >= 30) return "Poor";
+  return "Critical";
+}
+
+function severityChartSvg(counts: Record<string, number>): string {
+  const total = Object.values(counts).reduce((a, b) => a + b, 0);
+  if (!total) return '<div style="color:var(--muted);font-size:13px;padding:12px 0">No findings to chart.</div>';
+  const maxVal = Math.max(...Object.values(counts));
+  const order = ["critical", "high", "medium", "low", "info"];
+  const maxHeight = 140;
+  return order.map((key) => {
+    const val = counts[key] ?? 0;
+    const height = val ? Math.max(4, Math.round((val / maxVal) * maxHeight)) : 4;
+    const cls = key;
+    return `<div class="sev-bar ${cls}" style="height:${height}px" title="${key}: ${val}"><span class="count">${val}</span></div>`;
+  }).join("");
 }
 
 function metric(label: string, value: unknown): string {
@@ -169,18 +329,18 @@ function renderFixFirst(findings: Row[]): string {
 function renderFindings(repoPath: string, findings: Row[]): string {
   if (!findings.length) return "<p>No findings.</p>";
   return findings.map((item, index) => `<article class="card" data-row data-severity="${escAttr(item.severity)}" data-status="${escAttr(item.status)}">
-    <h3>${index + 1}. <span class="${escAttr(item.severity)}">${esc(item.severity)}</span> ${esc(item.title)}</h3>
-    <div class="meta">
+    <h3 style="margin:0 0 6px;font-size:14px;font-weight:600">${index + 1}. <span class="${escAttr(item.severity)}">${esc(item.severity)}</span> ${esc(item.title)}</h3>
+    <div class="meta" style="margin-bottom:8px">
       <span class="badge ${escAttr(item.status)}">${esc(item.status)}</span>
       <span>${esc(item.category)}</span>
       <span>${esc(item.path ?? "unknown")}:${esc(item.start_line ?? "?")}</span>
       <span>confidence ${esc(item.confidence ?? "unknown")}</span>
     </div>
-    <p>${esc(firstSentence(item.reasoning, 320))}</p>
-    <details><summary>Details</summary>
-      <p><strong>Source:</strong> ${esc(item.source ?? "unknown")}</p>
-      <p><strong>Sink:</strong> ${esc(item.sink ?? "unknown")}</p>
-      <p><strong>Remediation:</strong> ${esc(item.remediation ?? "Review and fix affected code.")}</p>
+    <p style="margin:0 0 8px;font-size:13px;color:var(--muted)">${esc(firstSentence(item.reasoning, 320))}</p>
+    <details><summary style="font-size:12px;padding:6px 0;border:none;color:var(--accent)">Details &amp; remediation</summary>
+      <p style="margin:6px 0;font-size:13px"><strong>Source:</strong> ${esc(item.source ?? "unknown")}</p>
+      <p style="margin:6px 0;font-size:13px"><strong>Sink:</strong> ${esc(item.sink ?? "unknown")}</p>
+      <p style="margin:6px 0;font-size:13px"><strong>Remediation:</strong> ${esc(item.remediation ?? "Review and fix affected code.")}</p>
       ${renderSnippet(repoPath, item)}
     </details>
   </article>`).join("");
@@ -264,6 +424,11 @@ function formatCost(value: unknown): string {
   if (value === null || value === undefined || value === "") return "not reported";
   const number = Number(value);
   return Number.isFinite(number) ? number.toFixed(6) : "not reported";
+}
+
+function formatDate(value: unknown): string {
+  if (!value || typeof value !== "string") return "";
+  try { return new Date(value).toLocaleString(); } catch { return value; }
 }
 
 function row(item: Row, cells: unknown[]): string {

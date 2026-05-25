@@ -9,9 +9,9 @@ describe("env", () => {
     expect(env.CODEGUARDIAN_MAX_AI_FINDINGS).toBe(100);
     expect(env.CODEGUARDIAN_MAX_AI_FINDINGS_LIMIT).toBe(1000);
     expect(env.CODEGUARDIAN_AI_TRIAGE_TARGET_CODE_FINDINGS).toBe(25);
-    expect(env.CODEGUARDIAN_AI_AUDIT_MAX_FILES).toBe(1000);
-    expect(env.CODEGUARDIAN_AI_AUDIT_MAX_ROUNDS).toBe(200);
-    expect(env.CODEGUARDIAN_AI_AUDIT_MAX_CHARS).toBe(4000000);
+    expect(env.CODEGUARDIAN_AI_AUDIT_MAX_FILES).toBe(100);
+    expect(env.CODEGUARDIAN_AI_AUDIT_MAX_ROUNDS).toBe(30);
+    expect(env.CODEGUARDIAN_AI_AUDIT_MAX_CHARS).toBe(500000);
     expect(env.AI_LOW_MODEL).toBe("");
     expect(env.AI_MEDIUM_MODEL).toBe("");
     expect(env.AI_HIGH_MODEL).toBe("");
