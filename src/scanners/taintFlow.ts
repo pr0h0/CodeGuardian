@@ -1,5 +1,5 @@
 import type { IndexedFile } from "../repo/repoIndexer.js";
-import { buildSecurityGraph, callRegex, sanitizerPattern, sourcePattern, splitArguments } from "../repo/securityGraph.js";
+import { buildSecurityGraph, callRegex, sanitizerPattern, sourcePattern, splitArguments, traceSinkBackPaths } from "../repo/securityGraph.js";
 import type { ScannerResult } from "./types.js";
 
 export function runTaintFlow(files: IndexedFile[]): ScannerResult[] {
@@ -60,6 +60,26 @@ export function runTaintFlow(files: IndexedFile[]): ScannerResult[] {
       endLine: sink.line,
       message: "User-controlled source appears directly inside dangerous sink.",
       raw: { sourceLine: sink.line, sinkLine: sink.line, dataFlow: [{ path: sink.path, line: sink.line, step: "source reaches sink on same line" }] }
+    });
+  }
+
+  for (const trace of traceSinkBackPaths(files)) {
+    results.push({
+      scanner: "taint-flow",
+      ruleId: `${trace.sink.sinkId}-sink-backtrace`,
+      title: trace.sink.title,
+      category: trace.sink.category,
+      severity: trace.sink.category === "xss" ? "medium" : "high",
+      path: trace.sink.path,
+      startLine: trace.sink.line,
+      endLine: trace.sink.line,
+      message: `Sink-first trace found ${trace.source.expression} reaching ${trace.sink.category} sink without a context-sufficient sanitizer.`,
+      raw: {
+        sourceLine: trace.source.line,
+        sinkLine: trace.sink.line,
+        dataFlow: trace.dataFlow,
+        sanitizerAssessment: trace.sanitizerAssessment
+      }
     });
   }
 

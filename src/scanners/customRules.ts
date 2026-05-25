@@ -36,6 +36,7 @@ export function runCustomRules(files: IndexedFile[], rules = loadCustomRules()):
       for (const match of file.content.matchAll(regex)) {
         if (shouldSkipMatch(rule, match[0])) continue;
         const line = lineAtOffset(file.content, match.index ?? 0);
+        const secretClassification = rule.category === "secrets" ? classifySecret(match[0], file.path) : undefined;
         results.push({
           scanner: "custom-rules",
           ruleId: rule.id,
@@ -45,13 +46,19 @@ export function runCustomRules(files: IndexedFile[], rules = loadCustomRules()):
           path: file.path,
           startLine: line,
           endLine: line,
-          message: redactSecrets(match[0].slice(0, 300)),
-          raw: { rule: enrichRule(rule), secretClassification: rule.category === "secrets" ? classifySecret(match[0], file.path) : undefined }
+          message: scannerMessage(match[0], secretClassification),
+          raw: { rule: enrichRule(rule), secretClassification }
         });
       }
     }
   }
   return results;
+}
+
+function scannerMessage(match: string, secretClassification?: ReturnType<typeof classifySecret>): string {
+  const redacted = redactSecrets(match.slice(0, 300));
+  if (!secretClassification) return redacted;
+  return `${redacted} (secret classification: ${secretClassification.kind}, confidence: ${secretClassification.confidence})`;
 }
 
 function shouldSkipMatch(rule: Rule, text: string): boolean {

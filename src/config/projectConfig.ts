@@ -1,9 +1,37 @@
 import fs from "node:fs";
 import path from "node:path";
 import { z } from "zod";
+import { minimatch } from "minimatch";
+import { DEFAULT_IGNORES } from "./defaults.js";
+
+export const VULNERABILITY_CLASSES = [
+  "injection",
+  "xss",
+  "auth",
+  "authz",
+  "ssrf",
+  "exposure",
+  "validation",
+  "dependency",
+  "crypto",
+  "misconfig",
+  "xxe",
+  "business-logic"
+] as const;
+
+const reportFiltersSchema = z.object({
+  minSeverity: z.enum(["critical", "high", "medium", "low", "info"]).optional(),
+  minConfidence: z.enum(["confirmed", "high", "medium", "low"]).optional(),
+  guidance: z.string().optional()
+}).default({});
 
 const schema = z.object({
   profile: z.enum(["all", "web", "cli", "php", "ruby", "rails", "laravel", "node", "python"]).optional(),
+  focusPaths: z.array(z.string()).optional().default([]),
+  avoidPaths: z.array(z.string()).optional().default([]),
+  vulnerabilityClasses: z.array(z.enum(VULNERABILITY_CLASSES)).optional().default([]),
+  rulesOfEngagement: z.string().optional().default(""),
+  reportFilters: reportFiltersSchema,
   disabledRules: z.array(z.string()).optional().default([]),
   severityOverrides: z.record(z.enum(["critical", "high", "medium", "low", "info"])).optional().default({}),
   failOn: z.enum(["critical", "high", "medium", "low", "none"]).optional(),
@@ -24,6 +52,8 @@ const schema = z.object({
 
 export type ProjectConfig = z.infer<typeof schema>;
 export type Profile = NonNullable<ProjectConfig["profile"]>;
+export type VulnerabilityClass = (typeof VULNERABILITY_CLASSES)[number];
+export type ReportFilters = ProjectConfig["reportFilters"];
 
 export function loadProjectConfig(repoPath: string): ProjectConfig {
   for (const name of [".codeguardian.json", ".codeguardian.yml", ".codeguardian.yaml"]) {
@@ -33,6 +63,16 @@ export function loadProjectConfig(repoPath: string): ProjectConfig {
     return schema.parse(parsed);
   }
   return schema.parse({});
+}
+
+export function assertProjectConfigPreflight(repoPath: string, config: ProjectConfig): void {
+  const missing = [
+    ...missingConfiguredPaths(repoPath, "focusPaths", config.focusPaths),
+    ...missingConfiguredPaths(repoPath, "avoidPaths", config.avoidPaths)
+  ];
+  if (!missing.length) return;
+  const details = missing.map((item) => `${item.field}: ${item.pattern}`).join(", ");
+  throw new Error(`Scan strategy path preflight failed. Configured paths must match at least one repository file or directory: ${details}`);
 }
 
 function parseSimpleYaml(input: string): Record<string, unknown> {
@@ -49,7 +89,10 @@ function parseSimpleYaml(input: string): Record<string, unknown> {
     }
     const nestedMap = line.match(/^\s+([A-Za-z0-9_./*-]+):\s*(.+)$/);
     if (nestedMap && activeMap) {
-      (root[activeMap] as Record<string, unknown>)[nestedMap[1]] = coerce(nestedMap[2].trim());
+      const nestedKey = activeMap === "reportFilters"
+        ? nestedMap[1].replace(/-([a-z])/g, (_, char) => char.toUpperCase())
+        : nestedMap[1];
+      (root[activeMap] as Record<string, unknown>)[nestedKey] = coerce(nestedMap[2].trim());
       continue;
     }
     activeArray = undefined;
@@ -59,7 +102,7 @@ function parseSimpleYaml(input: string): Record<string, unknown> {
     const key = match[1].replace(/-([a-z])/g, (_, char) => char.toUpperCase());
     const value = match[2].trim();
     if (!value) {
-      if (["severityOverrides", "scannerTimeouts"].includes(key)) {
+      if (["severityOverrides", "scannerTimeouts", "reportFilters"].includes(key)) {
         root[key] = {};
         activeMap = key;
       } else {
@@ -80,6 +123,42 @@ function coerce(value: string): unknown {
   if (/^(true|false)$/i.test(clean)) return clean.toLowerCase() === "true";
   if (/^\d+$/.test(clean)) return Number(clean);
   return clean;
+}
+
+function missingConfiguredPaths(repoPath: string, field: "focusPaths" | "avoidPaths", patterns: string[]): Array<{ field: string; pattern: string }> {
+  return patterns
+    .filter((pattern) => !repoEntryMatchesPattern(repoPath, pattern))
+    .map((pattern) => ({ field, pattern }));
+}
+
+function repoEntryMatchesPattern(repoPath: string, pattern: string): boolean {
+  const normalizedPattern = normalizePath(pattern);
+  if (!normalizedPattern) return false;
+  if (fs.existsSync(path.join(repoPath, normalizedPattern))) return true;
+
+  const ignored = new Set(DEFAULT_IGNORES);
+  const stack = [repoPath];
+  while (stack.length) {
+    const dir = stack.pop()!;
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      if (ignored.has(entry.name)) continue;
+      const absolute = path.join(dir, entry.name);
+      const relative = normalizePath(path.relative(repoPath, absolute));
+      if (pathMatches(relative, normalizedPattern, entry.isDirectory())) return true;
+      if (entry.isDirectory()) stack.push(absolute);
+    }
+  }
+  return false;
+}
+
+function pathMatches(relativePath: string, pattern: string, isDirectory: boolean): boolean {
+  return relativePath === pattern
+    || minimatch(relativePath, pattern, { dot: true })
+    || (isDirectory && minimatch(`${relativePath}/`, pattern, { dot: true }));
+}
+
+function normalizePath(value: string): string {
+  return value.replaceAll("\\", "/").replace(/^\.\//, "").replace(/^\/+/, "");
 }
 
 export function ruleAllowedByProfile(ruleId: string, category: string | undefined, filePath: string | undefined, profile: Profile): boolean {

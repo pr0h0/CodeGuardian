@@ -48,6 +48,9 @@ AI mode has two passes:
 
 - Scanner-result triage: sends compact context packs for high-signal scanner findings. AI mode keeps triaging additional SAST results in batches until it reaches the active code-finding target or the `--max-ai-findings` cap. True positives move into Code Findings; false positives move into AI False Positives and disappear from Additional SAST.
 - Exploratory source audit: sends a repository manifest first, lets the AI request source files by path, then sends bounded source packs so it can look for vulnerabilities missed by scanners. This is controlled by `--no-ai-audit`, `--max-ai-audit-files`, `--max-ai-audit-rounds`, and `--max-ai-audit-chars`.
+- Static source-pattern seeds: before AI triage, Codeguardian also runs lightweight source-aware checks for patterns that regex-only SAST often misses, including unsafe XML entity parsing, archive entry writes, NoSQL `$where` concatenation, redirect variables, filename/MIME upload validation, and sensitive routes without obvious inline guards. These are general seeds for AI/developer validation, not app-specific challenge rules.
+
+Before an AI scan starts, Codeguardian preflights the low, medium, and high model tiers with tiny structured requests so missing credentials, bad models, schema incompatibility, and billing blocks fail early. AI provider errors are classified as authentication, billing, rate-limit, server, invalid-request, or unknown; authentication/configuration and invalid-request failures fail fast, while billing/rate-limit/server failures are retried once. Spending-cap or billing-limit text returned as a normal model response is treated as a billing failure. AI job metadata in reports includes compact redacted prompt/response traces for preflight, triage, critic, repair, and audit calls.
 
 Reports default to timestamped files such as `codeguardian-report/report-APP-YYYY-MM-DD-HHMMSS.md`, `.json`, and `.sarif`.
 
@@ -132,6 +135,20 @@ disabledRules:
   - quality/large-file
 severityOverrides:
   custom-rules/debug-endpoint: low
+focusPaths:
+  - src/routes/**
+  - app/controllers/**
+avoidPaths:
+  - tests/**
+vulnerabilityClasses:
+  - injection
+  - authz
+  - ssrf
+rulesOfEngagement: "No destructive testing against shared environments."
+reportFilters:
+  minSeverity: medium
+  minConfidence: medium
+  guidance: "Drop missing-header-only findings."
 failOn: high
 maxAdditionalSastFindings: 100
 maxAiFindings: 150
@@ -144,6 +161,8 @@ incremental: true
 ```
 
 Profiles: `all`, `web`, `cli`, `php`, `ruby`, `rails`, `laravel`, `node`, `python`.
+
+Scan strategy fields are optional. `focusPaths` limits indexed source paths when no `--include` CLI glob is supplied, while `avoidPaths` is merged with CLI `--exclude` globs. Config preflight fails when a configured `focusPaths` or `avoidPaths` glob matches no repository file or directory, catching typos before the scan starts. `vulnerabilityClasses` steers AI triage/audit toward `injection`, `xss`, `auth`, `authz`, `ssrf`, `exposure`, `validation`, `dependency`, `crypto`, `misconfig`, `xxe`, and `business-logic`; exploratory audit also narrows its structured output schema to the configured classes. `rulesOfEngagement` and `reportFilters.guidance` are included in AI context; report severity/confidence thresholds filter generated report findings without deleting stored scan evidence.
 
 ## AI Instructions
 

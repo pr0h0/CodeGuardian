@@ -41,6 +41,35 @@ describe("taint-flow", () => {
     expect(results.some((result) => result.ruleId === "flow-command-interprocedural" && result.path === "src/server.ts")).toBe(true);
   });
 
+  it("traces backward from sinks through local assignments and records sanitizer assessment", () => {
+    const results = runTaintFlow([
+      file("src/proxy.ts", [
+        "app.get('/proxy', async (req, res) => {",
+        "  const target = req.query.url;",
+        "  const response = await fetch(target);",
+        "  res.send(await response.text());",
+        "});"
+      ].join("\n")),
+      file("src/safe-proxy.ts", [
+        "app.get('/safe-proxy', async (req, res) => {",
+        "  const target = allowlistUrl(req.query.url);",
+        "  const response = await fetch(target);",
+        "  res.send(await response.text());",
+        "});"
+      ].join("\n"))
+    ]);
+
+    const finding = results.find((result) => result.ruleId === "flow-ssrf-sink-backtrace");
+    expect(finding).toEqual(expect.objectContaining({
+      scanner: "taint-flow",
+      path: "src/proxy.ts",
+      startLine: 3,
+      category: "ssrf"
+    }));
+    expect((finding?.raw as any).sanitizerAssessment.sufficient).toBe(false);
+    expect(results.some((result) => result.path === "src/safe-proxy.ts" && result.ruleId === "flow-ssrf-sink-backtrace")).toBe(false);
+  });
+
   it("detects request data reaching template rendering sinks", () => {
     const results = runTaintFlow([
       file("src/views.ts", "res.render('profile', req.query);"),

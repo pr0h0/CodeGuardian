@@ -1,6 +1,41 @@
 import type { ContextPack } from "../repo/contextPackBuilder.js";
 import { categoryValues, confidenceValues, severityValues, statusValues } from "./schemas.js";
 
+export function buildSecurityVerdictSystemPrompt(): string {
+  return [
+    "Role: senior application-security triage engineer.",
+    "Objective: make a small first-pass verdict for one scanner result.",
+    "Prefer false_positive over weak claims. Ask for context only when one exact file or symbol would decide.",
+    "Return raw JSON only: {verdict, confidence, reason, requestedFiles, requestedSymbols}.",
+    "No prose, markdown, code fences, comments, or extra keys.",
+    "Use verdict true_positive only when supplied context already shows a plausible source, sink, missing control, and exploit preconditions.",
+    "Use false_positive when the scanner evidence is unsupported, dependency-only without reachable vulnerable API, test/dev-only, sanitized, or contradicted by context.",
+    "Use needs_context when a specific extra file or symbol is needed before deciding."
+  ].join("\n");
+}
+
+export function buildSecurityVerdictUserPrompt(contextPack: ContextPack): string {
+  return `Scope: one scanner result and nearby code only.
+
+Inputs:
+${JSON.stringify(contextPack, null, 2)}
+
+Verdict JSON schema:
+{
+  "verdict": "true_positive | false_positive | needs_context | parse_failed",
+  "confidence": "high | medium | low",
+  "reason": "short evidence-based reason",
+  "requestedFiles": ["exact/path.ts"],
+  "requestedSymbols": ["functionName"]
+}
+
+Rules:
+- Return raw JSON only.
+- Do not return a full finding in this step.
+- If scanner evidence lacks visible source, sink, missing control, and preconditions, use false_positive or needs_context.
+- If asking for context, request exact paths or symbols only.`;
+}
+
 export function buildSecurityTriageSystemPrompt(): string {
   return [
     "Role: senior application-security triage engineer.",
@@ -15,6 +50,7 @@ export function buildSecurityTriageSystemPrompt(): string {
     "If one extra file or function is needed to decide, request it with requestedFiles or requestedSymbols. After requestedContext is supplied, make a final decision and do not ask again.",
     "Return raw JSON object only. No prose, markdown, code fences, comments, explanations, or wrapper keys such as finding/result/findings.",
     "Use only enum values explicitly listed in the schema. Do not invent categories, severities, confidences, statuses, risks, or field names.",
+    "Enum fields are single strings, never arrays: category=\"security\", severity=\"high\", confidence=\"high\", status=\"confirmed_true_positive\".",
     "All required keys must exist even when isFinding is false.",
     "Never output real secrets. Redact values."
   ].join("\n");
@@ -32,10 +68,10 @@ Required strict JSON schema shape, with every key present and no extra keys:
 {
   "isFinding": true,
   "title": "short finding title",
-  "category": ${JSON.stringify(categoryValues)},
-  "severity": ${JSON.stringify(severityValues)},
-  "confidence": ${JSON.stringify(confidenceValues)},
-  "status": ${JSON.stringify(statusValues)},
+  "category": "security",
+  "severity": "high",
+  "confidence": "high",
+  "status": "confirmed_true_positive",
   "affectedLocations": [{"path": "path from input", "startLine": 1, "endLine": 1}],
   "source": "scanner or source description",
   "sourceLine": 1,
@@ -56,9 +92,17 @@ Required strict JSON schema shape, with every key present and no extra keys:
   "secureCodeExample": null
 }
 
+Allowed enum values:
+- category: ${JSON.stringify(categoryValues)}
+- severity: ${JSON.stringify(severityValues)}
+- confidence: ${JSON.stringify(confidenceValues)}
+- status: ${JSON.stringify(statusValues)}
+- recommendedDynamicTests[].risk: ["safe","medium","high"]
+
 Rules:
 - Output raw JSON only. No prose, no markdown fences, no comments.
 - Use only predefined enum values shown above.
+- Enum fields must be single strings, never arrays. Do not output category=["xss"] or severity=["high"].
 - Do not add keys outside the schema.
 - Evidence must cite exact supplied path and line.
 - If sanitizer, allowlist, auth guard, test-only path, or dependency-only code disproves exploitability, return isFinding=false.

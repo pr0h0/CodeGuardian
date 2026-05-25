@@ -47,7 +47,7 @@ function latestPreviousScan(db: Db, repoPath: string, currentScanId: string): st
 }
 
 function findingFingerprints(db: Db, scanId: string): string[] {
-  const rows = db.prepare("SELECT title, category, severity, path, start_line, source FROM findings WHERE scan_id = ? AND status != 'false_positive'").all(scanId) as Record<string, unknown>[];
+  const rows = db.prepare("SELECT fingerprint, title, category, severity, path, start_line, source FROM findings WHERE scan_id = ? AND status != 'false_positive'").all(scanId) as Record<string, unknown>[];
   return rows.map((row) => row.fingerprint ? String(row.fingerprint) : [
     row.category ?? "",
     row.severity ?? "",

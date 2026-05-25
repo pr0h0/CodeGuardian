@@ -1,6 +1,9 @@
 import fs from "node:fs";
 import path from "node:path";
 import { ensureDir } from "../utils/paths.js";
+import { sourceSnippetKey, type ReportModel } from "./model.js";
+import { applyReportFilters } from "./filters.js";
+import { scanStrategyMetadata, type ScanStrategyMetadata } from "../core/scanStrategy.js";
 
 type Row = Record<string, any>;
 
@@ -15,13 +18,16 @@ function countBy(rows: Row[], key: string): Record<string, number> {
 export function writeMarkdownReport(outDir: string, bundle: any, warnings: string[] = [], reportBase = "report"): string {
   ensureDir(outDir);
   const repoPath = String(bundle.scan?.repo_path ?? "");
-  const findings = bundle.findings ?? [];
+  const reportFilterResult = applyReportFilters(bundle.findings ?? [], bundle.projectConfig?.reportFilters);
+  const findings = reportFilterResult.findings;
   const scanner = bundle.scannerResults ?? [];
+  const reportModel = bundle.reportModel as ReportModel | undefined;
+  const scanStrategy = (bundle.scanStrategy as ScanStrategyMetadata | undefined) ?? scanStrategyMetadata(bundle.projectConfig ?? {});
   const compliance = scanner.filter((item: Row) => item.scanner === "compliance");
   const attackChains = scanner.filter((item: Row) => item.scanner === "correlation");
   const codeFindings = findings.filter((item: Row) => item.category !== "dependency");
   const dependencyResults = scanner.filter(isDependencyVulnerabilityResult);
-  const dependencyFindings = buildDependencyFindings(repoPath, dependencyResults);
+  const dependencyFindings = buildDependencyFindings(repoPath, dependencyResults, reportModel);
   const confirmedCodeFindings = dedupeCodeFindings(codeFindings.filter((item: Row) => item.status !== "false_positive"));
   const falsePositives = codeFindings.filter((item: Row) => item.status === "false_positive");
   const buckets = bucketCodeFindings(confirmedCodeFindings);
@@ -39,13 +45,16 @@ export function writeMarkdownReport(outDir: string, bundle: any, warnings: strin
       `- Attack chains: ${attackChains.length}`,
       `- Compliance evidence rows: ${compliance.length}`,
       `- False positives: ${falsePositives.length}`,
+      `- Report-filtered findings: ${reportFilterResult.filteredCount}`,
       `- Suppressed findings: ${bundle.suppressions?.suppressed ?? 0}`
     ], true),
+    ...renderSection("Scan Strategy", renderScanStrategy(scanStrategy, reportFilterResult.filteredCount), false),
+    ...renderSection("Security Intelligence", renderSecurityIntelligence(bundle.securityIntelligence), false),
     ...renderSection("Action Plan", renderActionPlan(confirmedCodeFindings, dependencyFindings), true),
     ...renderSection("Top 5 Fix First", renderTopFixes(confirmedCodeFindings, dependencyFindings), true),
     ...renderSection("Attack Chains", renderAttackChains(attackChains), true, `${attackChains.length} chains`),
-    ...renderSection("Confirmed Code Findings", renderCodeFindings(buckets.confirmed, repoPath), true, `${buckets.confirmed.length} items`),
-    ...renderSection("Suspected / Needs Validation", renderCodeFindings([...buckets.suspected, ...buckets.needsDynamic], repoPath), false, `${buckets.suspected.length + buckets.needsDynamic.length} items`),
+    ...renderSection("Confirmed Code Findings", renderCodeFindings(buckets.confirmed, repoPath, reportModel), true, `${buckets.confirmed.length} items`),
+    ...renderSection("Suspected / Needs Validation", renderCodeFindings([...buckets.suspected, ...buckets.needsDynamic], repoPath, reportModel), false, `${buckets.suspected.length + buckets.needsDynamic.length} items`),
     ...renderSection("Dependency Findings", dependencyFindings.length ? dependencyFindings.flatMap((item, index) => renderDependencyFinding(item, index + 1)) : ["No vulnerable dependency findings found."], false, `${dependencyFindings.length} items`),
     ...renderSection("Compliance Evidence", renderComplianceEvidence(compliance), false, `${compliance.length} controls`),
     ...renderSection("AI False Positives", falsePositives.length ? falsePositives.flatMap((item: Row, index: number) => renderFalsePositive(item, index + 1)) : ["No AI-triaged false positives recorded."], false, `${falsePositives.length} items`),
@@ -65,8 +74,9 @@ export function writeMarkdownReport(outDir: string, bundle: any, warnings: strin
       `- AI models: ${escapeHtml(bundle.scan?.model ?? "none")}`,
       `- AI instructions: ${bundle.aiInstructions?.loaded ? `${escapeHtml(bundle.aiInstructions.path)} (${bundle.aiInstructions.chars} chars)` : "not supplied"}`
     ], false),
+    ...renderSection("AI Jobs", renderAiJobs(bundle.aiJobs), false),
     ...renderSection("Scanner Results", [
-      ...["semgrep", "gitleaks", "trivy", "osv-scanner", "bearer", "custom-rules", "taint-lite", "taint-flow", "config-checks", "correlation", "compliance", "quality"].map((scannerName) => `- ${scannerName}: ${scanner.filter((item: Row) => item.scanner === scannerName).length} results`),
+      ...["semgrep", "gitleaks", "trivy", "osv-scanner", "bearer", "custom-rules", "source-patterns", "taint-lite", "taint-flow", "business-invariants", "config-checks", "correlation", "compliance", "quality"].map((scannerName) => `- ${scannerName}: ${scanner.filter((item: Row) => item.scanner === scannerName).length} results`),
       ...(bundle.incremental?.enabled ? [`- Incremental local scan: changed files ${bundle.incremental.changedFiles}, local scanner files ${bundle.incremental.localScannerFiles}`] : [])
     ], false),
     ...renderSection("Suppressions", bundle.suppressions?.suppressed ? [`- Suppressed: ${bundle.suppressions.suppressed}`, ...(bundle.suppressions.reasons ?? []).slice(0, 20).map((reason: string) => `- ${escapeHtml(reason)}`)] : ["- None"], false),
@@ -80,6 +90,53 @@ export function writeMarkdownReport(outDir: string, bundle: any, warnings: strin
 function formatCounts(rows: Row[], key: string): string[] {
   const counts = Object.entries(countBy(rows, key)).map(([k, v]) => `- ${k}: ${v}`);
   return counts.length ? counts : ["- None"];
+}
+
+function renderScanStrategy(strategy: ScanStrategyMetadata, filteredCount: number): string[] {
+  const filters = strategy.reportFilters ?? {};
+  return [
+    `- Focus paths: ${strategy.focusPaths.length ? strategy.focusPaths.map(escapeHtml).join(", ") : "all indexed paths"}`,
+    `- Avoid paths: ${strategy.avoidPaths.length ? strategy.avoidPaths.map(escapeHtml).join(", ") : "default ignores only"}`,
+    `- Vulnerability classes: ${strategy.vulnerabilityClasses.length ? strategy.vulnerabilityClasses.map(escapeHtml).join(", ") : "all"}`,
+    `- Rules of engagement: ${strategy.rulesOfEngagement ? "configured" : "not configured"}`,
+    `- Report minimum severity: ${escapeHtml(String(filters.minSeverity ?? "none"))}`,
+    `- Report minimum confidence: ${escapeHtml(String(filters.minConfidence ?? "none"))}`,
+    ...(filters.guidance ? [`- Report guidance: ${escapeHtml(filters.guidance)}`] : []),
+    `- Report-filtered findings: ${filteredCount}`
+  ];
+}
+
+function renderSecurityIntelligence(intelligence?: Row): string[] {
+  if (!intelligence) return ["- Security intelligence artifact was not generated."];
+  const coverage = intelligence.coverage ?? {};
+  const catalog = Array.isArray(intelligence.catalog) ? intelligence.catalog : [];
+  const invariants = Array.isArray(intelligence.invariants) ? intelligence.invariants : [];
+  const boundaries = Array.isArray(intelligence.boundaries) ? intelligence.boundaries : [];
+  const highRiskFiles = Array.isArray(intelligence.highRiskFiles) ? intelligence.highRiskFiles : [];
+  const negativeEvidence = Array.isArray(intelligence.negativeEvidence) ? intelligence.negativeEvidence : [];
+  const artifactEvents = Array.isArray(intelligence.auditArtifacts) ? intelligence.auditArtifacts : [];
+  const catalogCounts = countArrayBy(catalog, "kind");
+  return [
+    `- Summary: ${escapeHtml(intelligence.summary ?? "not recorded")}`,
+    `- Entrypoints: ${coverage.entrypointFiles ?? 0} files, ${(intelligence.entrypoints ?? []).length ?? 0} routes`,
+    `- Boundaries: ${coverage.boundaries ?? boundaries.length}`,
+    `- Catalog: sources=${catalogCounts.source ?? 0}, sinks=${catalogCounts.sink ?? 0}, sanitizers=${catalogCounts.sanitizer ?? 0}, guards=${catalogCounts.guard ?? 0}`,
+    `- Business invariants: ${invariants.length}`,
+    `- Negative evidence memory: ${negativeEvidence.length}`,
+    `- AI audit artifact events: ${artifactEvents.length}`,
+    "",
+    ...highRiskFiles.slice(0, 10).map((item: Row) => `- High-risk file: ${escapeHtml(item.path)} score=${item.score} reasons=${escapeHtml((item.reasons ?? []).slice(0, 4).join(", "))}`),
+    ...invariants.slice(0, 8).map((item: Row) => `- Invariant: ${escapeHtml(item.category)} ${escapeHtml(item.path)}:${item.line} - ${escapeHtml(item.rule)}`),
+    ...boundaries.slice(0, 8).map((item: Row) => `- Boundary: ${escapeHtml(item.id)} files=${item.fileCount} entrypoints=${item.entrypointCount}`)
+  ];
+}
+
+function countArrayBy(rows: Row[], key: string): Record<string, number> {
+  return rows.reduce((acc, row) => {
+    const value = String(row[key] ?? "unknown");
+    acc[value] = (acc[value] ?? 0) + 1;
+    return acc;
+  }, {} as Record<string, number>);
 }
 
 function renderSection(title: string, body: string[], open = false, badge = ""): string[] {
@@ -173,6 +230,19 @@ function renderAiUsage(rows?: Row[]): string[] {
     ].join(" | ").replace(/^/, "| ").replace(/$/, " |"));
   }
   return lines;
+}
+
+function renderAiJobs(summary?: Row): string[] {
+  if (!summary || !Array.isArray(summary.events) || !summary.events.length) return ["- No AI jobs recorded."];
+  return [
+    `- Total jobs: ${summary.total ?? summary.events.length}`,
+    `- Succeeded: ${summary.succeeded ?? 0}`,
+    `- Failed: ${summary.failed ?? 0}`,
+    "",
+    "| Type | Status | Label | Elapsed ms | Error |",
+    "|---|---|---|---:|---|",
+    ...summary.events.slice(0, 30).map((event: Row) => `| ${tableCell(event.type)} | ${tableCell(event.status)} | ${tableCell(event.label)} | ${tableCell(event.elapsedMs ?? 0)} | ${tableCell(event.error ?? "")} |`)
+  ];
 }
 
 function formatInteger(value: unknown): string {
@@ -357,7 +427,7 @@ function dedupeCodeFindings(findings: Row[]): Row[] {
   });
 }
 
-function renderCodeFindings(findings: Row[], repoPath: string): string[] {
+function renderCodeFindings(findings: Row[], repoPath: string, reportModel?: ReportModel): string[] {
   if (!findings.length) return ["No findings in this bucket."];
   return findings.flatMap((item, index) => renderItemDetails(
     `${index + 1}. ${escapeHtml(item.severity)} ${escapeHtml(item.title)} @${escapeHtml(item.path ?? "unknown")}:${item.start_line ?? "?"}`,
@@ -384,7 +454,7 @@ function renderCodeFindings(findings: Row[], repoPath: string): string[] {
       `- Location: \`${escapeHtml(item.path ?? "unknown")}:${item.start_line ?? "?"}\``,
       "",
       "### Evidence Snippet",
-      ...renderSnippet(repoPath, item),
+      ...renderSnippet(repoPath, item, reportModel),
       "",
       "### Steps to Reproduce",
       ...reproductionSteps(item),
@@ -435,7 +505,7 @@ interface DependencyFinding {
   sources: Row[];
 }
 
-function buildDependencyFindings(repoPath: string, results: Row[]): DependencyFinding[] {
+function buildDependencyFindings(repoPath: string, results: Row[], reportModel?: ReportModel): DependencyFinding[] {
   const groups = new Map<string, Row[]>();
   for (const result of results) {
     const raw = parseRaw(result.raw_json);
@@ -447,8 +517,8 @@ function buildDependencyFindings(repoPath: string, results: Row[]): DependencyFi
     const raw = parseRaw(first.raw_json);
     const packageName = dependencyPackageName(raw, first);
     const cves = [...new Set(items.map((item) => item.rule_id).filter(Boolean))];
-    const direct = isDirectDependency(repoPath, packageName);
-    const usageEvidence = findDependencyUsage(repoPath, packageName);
+    const direct = reportModel?.dependencyDirect?.[packageName] ?? isDirectDependency(repoPath, packageName);
+    const usageEvidence = reportModel?.dependencyUsage?.[packageName] ?? findDependencyUsage(repoPath, packageName);
     const used = usageEvidence.length > 0;
     const severity = maxSeverity(items.map((item) => item.severity));
     return {
@@ -457,7 +527,7 @@ function buildDependencyFindings(repoPath: string, results: Row[]): DependencyFi
       severity,
       titles: [...new Set(items.map((item) => cleanParagraph(item.title)).filter(Boolean))],
       direct,
-      packagePath: dependencyPackagePath(repoPath, packageName, direct),
+      packagePath: direct ? `package.json -> ${packageName}` : reportModel?.dependencyPackagePath?.[packageName] ?? dependencyPackagePath(repoPath, packageName, direct),
       used,
       usageEvidence,
       reachability: dependencyReachability(direct, used),
@@ -576,6 +646,7 @@ function findDependencyUsage(repoPath: string, packageName: string): string[] {
 }
 
 function walkSourceFiles(repoPath: string): string[] {
+  if (!repoPath || !fs.existsSync(repoPath) || !fs.statSync(repoPath).isDirectory()) return [];
   const ignored = new Set([".git", "node_modules", "dist", "build", "coverage", ".next", ".nuxt", "vendor", ".codeguardian"]);
   const extensions = new Set([".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".py", ".go", ".rb", ".php", ".java", ".cs"]);
   const files: string[] = [];
@@ -649,7 +720,9 @@ function confidenceReason(item: Row): string {
   return "Evidence is weak or incomplete; treat as a validation task before fixing.";
 }
 
-function renderSnippet(repoPath: string, item: Row): string[] {
+function renderSnippet(repoPath: string, item: Row, reportModel?: ReportModel): string[] {
+  const prepared = reportModel?.sourceSnippets?.[sourceSnippetKey(item.path, item.start_line, item.end_line || item.start_line)];
+  if (prepared) return prepared;
   if (!repoPath || !item.path || !item.start_line) return ["No snippet available."];
   const absolute = path.join(repoPath, item.path);
   if (!fs.existsSync(absolute) || !fs.statSync(absolute).isFile()) return ["No snippet available."];

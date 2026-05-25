@@ -4,6 +4,7 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { loadProjectConfig, ruleAllowedByProfile } from "../../src/config/projectConfig.js";
 import { findingFingerprint, scannerFingerprint } from "../../src/core/fingerprint.js";
+import { createRunContext } from "../../src/core/runContext.js";
 
 describe("project config and fingerprints", () => {
   it("loads simple yaml config", () => {
@@ -27,6 +28,71 @@ describe("project config and fingerprints", () => {
     expect(config.aiMediumModel).toBe("balanced-model");
     expect(config.aiHighModel).toBe("hard-model");
     expect(config.incremental).toBe(true);
+  });
+
+  it("loads Shannon-style scan strategy fields", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cg-config-"));
+    fs.writeFileSync(path.join(dir, ".codeguardian.yml"), [
+      "focusPaths:",
+      "  - src/routes/**",
+      "  - app/controllers/**",
+      "avoidPaths:",
+      "  - tests/**",
+      "vulnerabilityClasses:",
+      "  - injection",
+      "  - authz",
+      "  - ssrf",
+      "rulesOfEngagement: No destructive testing against shared environments.",
+      "reportFilters:",
+      "  minSeverity: medium",
+      "  minConfidence: medium",
+      "  guidance: Drop missing-header-only findings."
+    ].join("\n"));
+
+    const config = loadProjectConfig(dir);
+
+    expect(config.focusPaths).toEqual(["src/routes/**", "app/controllers/**"]);
+    expect(config.avoidPaths).toEqual(["tests/**"]);
+    expect(config.vulnerabilityClasses).toEqual(["injection", "authz", "ssrf"]);
+    expect(config.rulesOfEngagement).toBe("No destructive testing against shared environments.");
+    expect(config.reportFilters).toEqual({
+      minSeverity: "medium",
+      minConfidence: "medium",
+      guidance: "Drop missing-header-only findings."
+    });
+  });
+
+  it("uses config focus and avoid paths as scan include/exclude defaults", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cg-config-"));
+    fs.mkdirSync(path.join(dir, "src/routes"), { recursive: true });
+    fs.mkdirSync(path.join(dir, "tests"), { recursive: true });
+    fs.writeFileSync(path.join(dir, "src/routes/app.ts"), "export const route = true;");
+    fs.writeFileSync(path.join(dir, "tests/app.test.ts"), "export const test = true;");
+    fs.writeFileSync(path.join(dir, ".codeguardian.yml"), [
+      "focusPaths:",
+      "  - src/routes/**",
+      "avoidPaths:",
+      "  - tests/**"
+    ].join("\n"));
+
+    const ctx = createRunContext(dir, { out: path.join(dir, "reports"), exclude: ["fixtures/**"] });
+
+    expect(ctx.options.include).toEqual(["src/routes/**"]);
+    expect(ctx.options.exclude).toEqual(["tests/**", "fixtures/**"]);
+  });
+
+  it("fails preflight when configured scan strategy paths match nothing", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cg-config-"));
+    fs.mkdirSync(path.join(dir, "src"), { recursive: true });
+    fs.writeFileSync(path.join(dir, "src/app.ts"), "export const app = true;");
+    fs.writeFileSync(path.join(dir, ".codeguardian.yml"), [
+      "focusPaths:",
+      "  - src/missing/**",
+      "avoidPaths:",
+      "  - tests/missing/**"
+    ].join("\n"));
+
+    expect(() => createRunContext(dir, { out: path.join(dir, "reports") })).toThrow(/scan strategy path preflight failed/i);
   });
 
   it("filters rules by profile", () => {

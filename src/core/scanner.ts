@@ -1,7 +1,7 @@
 import path from "node:path";
 import fs from "node:fs";
 import { openDatabase } from "../db/database.js";
-import { createScan, finishScan, getScanBundle, insertFinding, insertScannerResult, insertScannerRun, upsertScanCache } from "../db/repositories.js";
+import { createScan, finishScan, getScanBundle, insertFinding, insertScannerResult, insertScannerRun } from "../db/repositories.js";
 import { indexRepository } from "../repo/repoIndexer.js";
 import { runCustomRules } from "../scanners/customRules.js";
 import { runQualityChecks } from "../scanners/quality.js";
@@ -15,12 +15,18 @@ import { runTaintFlow } from "../scanners/taintFlow.js";
 import { runConfigChecks } from "../scanners/configChecks.js";
 import { runComplianceChecks } from "../scanners/compliance.js";
 import { runCorrelationChecks } from "../scanners/correlations.js";
+import { runSourcePatternChecks } from "../scanners/sourcePatterns.js";
+import { runBusinessInvariantChecks } from "../repo/businessInvariants.js";
 import { applySuppressions } from "../scanners/suppressions.js";
 import { deterministicFinding, aiTriage } from "../ai/triage.js";
-import { runExploratoryAudit } from "../ai/audit.js";
+import { runTargetedExploratoryAudit, type AiAuditArtifactEvent } from "../ai/audit.js";
 import { aiHighModel, aiLowModel, aiMediumModel, createAiProvider } from "../ai/provider.js";
 import type { AiProvider } from "../ai/types.js";
 import { AiUsageTracker, type AiTier, withUsageTracking } from "../ai/usage.js";
+import { AiJobRecorder } from "../ai/jobs.js";
+import { withAiReliability } from "../ai/reliability.js";
+import { preflightAiProviders } from "../ai/preflight.js";
+import { dedupeFindingsWithAi } from "../ai/dedupe.js";
 import { buildContextPack } from "../repo/contextPackBuilder.js";
 import { loadAiInstructions } from "../repo/aiInstructions.js";
 import type { IndexedFile } from "../repo/repoIndexer.js";
@@ -29,6 +35,7 @@ import { writeMarkdownReport } from "../reports/markdown.js";
 import { writeSarifReport } from "../reports/sarif.js";
 import { writeHtmlReport } from "../reports/html.js";
 import { writeRuleExport } from "../reports/ruleExport.js";
+import { prepareReportBundle } from "../reports/model.js";
 import type { RunContext } from "./runContext.js";
 import { DEFAULT_DB_PATH, SEVERITY_ORDER } from "../config/defaults.js";
 import { checkTool } from "../tools/commandRunner.js";
@@ -38,9 +45,15 @@ import { ruleAllowedByProfile } from "../config/projectConfig.js";
 import { planAiTriageCandidates, scoreScannerResult } from "./triagePlanner.js";
 import { scannerImages } from "../scanners/dockerFallback.js";
 import type { ScannerResult, Finding } from "../scanners/types.js";
-import { sha256 } from "../utils/hashing.js";
 import { lineSlice } from "../utils/lineMap.js";
 import { redactSecrets } from "../utils/redact.js";
+import { sha256 } from "../utils/hashing.js";
+import { buildScanPlan, filterResultsToScanScope, persistScanPlanCache } from "./scanPlan.js";
+import { reduceScannerResultNoise } from "./scannerNoise.js";
+import { dedupeFindings } from "./findingDeduper.js";
+import { buildScanStrategyInstructions, combineAiInstructions, scanStrategyMetadata } from "./scanStrategy.js";
+import { buildSecurityIntelligence, type AiSourceMapForIntelligence } from "../repo/securityIntelligence.js";
+import { loadNegativeEvidenceMemory } from "./negativeEvidence.js";
 
 type AiProviderSet = Record<AiTier, AiProvider> & { critic?: AiProvider };
 
@@ -49,6 +62,7 @@ export async function runScan(ctx: RunContext): Promise<{ scanId: string; report
   let aiMeta: { provider?: string; model?: string } = {};
   let aiProviders: AiProviderSet | undefined;
   const aiUsageTracker = new AiUsageTracker();
+  const aiJobRecorder = new AiJobRecorder();
   if (ctx.options.ai) {
     ctx.logger.info("ai: loading provider config");
     const providerName = ctx.options.provider ?? ctx.env.AI_PROVIDER;
@@ -58,14 +72,18 @@ export async function runScan(ctx: RunContext): Promise<{ scanId: string; report
     const low = createAiProvider(ctx.env, ctx.options.provider, lowModel);
     const medium = createAiProvider(ctx.env, ctx.options.provider, mediumModel);
     const high = createAiProvider(ctx.env, ctx.options.provider, highModel);
+    const reliableLow = withAiReliability(low.provider, { log: (message) => ctx.logger.info(message) });
+    const reliableMedium = withAiReliability(medium.provider, { log: (message) => ctx.logger.info(message) });
+    const reliableHigh = withAiReliability(high.provider, { log: (message) => ctx.logger.info(message) });
     aiProviders = {
-      low: withUsageTracking(low.provider, aiUsageTracker, "low", low.model),
-      medium: withUsageTracking(medium.provider, aiUsageTracker, "medium", medium.model),
-      high: withUsageTracking(high.provider, aiUsageTracker, "high", high.model),
-      critic: ctx.projectConfig.aiCritic === false ? undefined : withUsageTracking(medium.provider, aiUsageTracker, "medium", medium.model)
+      low: withUsageTracking(reliableLow, aiUsageTracker, "low", low.model),
+      medium: withUsageTracking(reliableMedium, aiUsageTracker, "medium", medium.model),
+      high: withUsageTracking(reliableHigh, aiUsageTracker, "high", high.model),
+      critic: ctx.projectConfig.aiCritic === false ? undefined : withUsageTracking(reliableMedium, aiUsageTracker, "medium", medium.model)
     };
     aiMeta = { provider: low.provider.name, model: `low:${low.model} / medium:${medium.model} / high:${high.model}${ctx.projectConfig.aiCritic === false ? " / critic:disabled" : " / critic:medium"}` };
     ctx.logger.info(`ai: provider=${aiMeta.provider} low=${low.model} medium=${medium.model} high=${high.model}${ctx.projectConfig.aiCritic === false ? " critic=disabled" : " critic=medium"}`);
+    await preflightAiProviders(aiProviders, (message) => ctx.logger.info(message), aiJobRecorder);
   }
   ctx.logger.info("db: opening scan database");
   const scanId = createScan(db, ctx.repoPath, ctx.options, aiMeta.provider, aiMeta.model);
@@ -84,26 +102,29 @@ export async function runScan(ctx: RunContext): Promise<{ scanId: string; report
     });
     ctx.logger.info(`index: indexed ${files.length} files`);
     const aiInstructions = loadAiInstructions(ctx.repoPath);
+    const strategyInstructions = buildScanStrategyInstructions(ctx.projectConfig);
+    const effectiveAiInstructions = combineAiInstructions(aiInstructions.content, strategyInstructions);
     if (aiInstructions.path) ctx.logger.info(`ai-instructions: loaded ${aiInstructions.path} chars=${aiInstructions.chars}`);
-    const changedPaths = new Set(files.filter((file) => {
-      const cached = db.prepare("SELECT sha256 FROM scan_cache WHERE repo_path = ? AND path = ?").get(ctx.repoPath, file.path) as { sha256?: string } | undefined;
-      return cached?.sha256 !== sha256(file.content);
-    }).map((file) => file.path));
-    const localFiles = ctx.options.incremental ? files.filter((file) => changedPaths.has(file.path)) : files;
-    if (ctx.options.incremental) ctx.logger.info(`incremental: changed files=${changedPaths.size} localScannerFiles=${localFiles.length}`);
-    for (const file of files) {
-      const record = (getScanBundle(db, scanId).files as any[]).find((item) => item.path === file.path);
-      if (record?.sha256) upsertScanCache(db, ctx.repoPath, { path: file.path, sha256: record.sha256, language: file.language, lineCount: file.lineCount });
-    }
+    if (strategyInstructions) ctx.logger.info("scan-strategy: AI steering enabled from project config");
+    const scanPlan = buildScanPlan(db, ctx.repoPath, files, { incremental: ctx.options.incremental });
+    persistScanPlanCache(db, ctx.repoPath, files);
+    const localFiles = scanPlan.localFiles;
+    if (ctx.options.incremental) ctx.logger.info(`incremental: changed files=${scanPlan.changedPaths.size} localScannerFiles=${localFiles.length}`);
     ctx.logger.info("scanners: running custom rules");
     const customResults = runCustomRules(localFiles);
     ctx.logger.info(`scanners: custom rules produced ${customResults.length} results`);
+    ctx.logger.info("scanners: running source-pattern checks");
+    const sourcePatternResults = runSourcePatternChecks(localFiles);
+    ctx.logger.info(`scanners: source-pattern checks produced ${sourcePatternResults.length} results`);
     ctx.logger.info("scanners: running taint-lite");
     const taintResults = runTaintLite(localFiles);
     ctx.logger.info(`scanners: taint-lite produced ${taintResults.length} results`);
     ctx.logger.info("scanners: running taint-flow");
     const taintFlowResults = runTaintFlow(localFiles);
     ctx.logger.info(`scanners: taint-flow produced ${taintFlowResults.length} results`);
+    ctx.logger.info("scanners: running business invariant checks");
+    const businessInvariantResults = runBusinessInvariantChecks(localFiles);
+    ctx.logger.info(`scanners: business invariant checks produced ${businessInvariantResults.length} results`);
     ctx.logger.info("scanners: running config checks");
     const configResults = runConfigChecks(localFiles);
     ctx.logger.info(`scanners: config checks produced ${configResults.length} results`);
@@ -119,16 +140,19 @@ export async function runScan(ctx: RunContext): Promise<{ scanId: string; report
       runLoggedScanner(ctx, db, scanId, "bearer", () => runBearer(ctx.repoPath, scannerTimeout(ctx, "bearer")))
     ];
     const scanners = await Promise.all(scannerJobs);
+    const externalResults = filterResultsToScanScope(scanners.flatMap((scan) => {
+      if (scan.warning) warnings.push(scan.warning);
+      return scan.results;
+    }), scanPlan);
     const preliminaryScannerResults = [
       ...customResults,
+      ...sourcePatternResults,
       ...taintResults,
       ...taintFlowResults,
+      ...businessInvariantResults,
       ...configResults,
       ...qualityResults,
-      ...scanners.flatMap((scan) => {
-        if (scan.warning) warnings.push(scan.warning);
-        return scan.results;
-      })
+      ...externalResults
     ];
     ctx.logger.info("scanners: running compliance checks");
     const complianceResults = runComplianceChecks(files, preliminaryScannerResults);
@@ -140,11 +164,17 @@ export async function runScan(ctx: RunContext): Promise<{ scanId: string; report
     const configuredResults = applyProjectPolicy(rawScannerResults, ctx);
     const suppressed = applySuppressions(ctx.repoPath, files, configuredResults);
     if (suppressed.summary.suppressed) ctx.logger.info(`suppressions: removed ${suppressed.summary.suppressed} results`);
-    const scannerResults = attachScannerFingerprints(suppressed.results);
+    const noiseReducedResults = reduceScannerResultNoise(suppressed.results);
+    if (noiseReducedResults.length !== suppressed.results.length) ctx.logger.info(`noise: collapsed ${suppressed.results.length - noiseReducedResults.length} duplicate scanner results`);
+    const scannerResults = attachScannerFingerprints(noiseReducedResults);
     ctx.logger.info(`scanners: total ${scannerResults.length} results`);
+    const negativeEvidence = loadNegativeEvidenceMemory(db, ctx.repoPath, scanId);
+    if (negativeEvidence.length) ctx.logger.info(`ai-memory: loaded ${negativeEvidence.length} false-positive evidence items`);
+    const auditArtifacts: AiAuditArtifactEvent[] = [];
+    let aiSourceMap: AiSourceMapForIntelligence | undefined;
     ctx.logger.info("db: storing scanner results");
     for (const result of scannerResults) insertScannerResult(db, scanId, result);
-    const triageCandidates = planAiTriageCandidates(scannerResults, ctx.options.maxAiFindings);
+    const triageCandidates = planAiTriageCandidates(scannerResults, ctx.options.maxAiFindings, ctx.projectConfig.vulnerabilityClasses);
     const targetActiveFindings = Math.min(ctx.options.aiTriageTargetCodeFindings, ctx.options.maxAiFindings);
     ctx.logger.info(`triage: planned ${triageCandidates.length} AI scanner candidates max=${ctx.options.maxAiFindings} targetActive=${targetActiveFindings}`);
     const aiBudget = { triageContextChars: 0, estimatedTriageTokens: 0, triagedScannerResults: 0, triageTargetCodeFindings: targetActiveFindings };
@@ -154,36 +184,60 @@ export async function runScan(ctx: RunContext): Promise<{ scanId: string; report
         candidates: triageCandidates,
         files,
         scannerResults,
-        aiInstructions: aiInstructions.content,
+        aiInstructions: effectiveAiInstructions,
         maxContextChars: ctx.env.CODEGUARDIAN_MAX_CONTEXT_CHARS,
         targetActiveFindings,
         log: (message) => ctx.logger.info(message),
-        aiBudget
+        aiBudget,
+        aiJobRecorder
       })
       : scannerResults.filter((result) => result.scanner !== "compliance").map(deterministicFinding);
     aiBudget.estimatedTriageTokens = Math.ceil(aiBudget.triageContextChars / 4);
     if (aiBudget.triagedScannerResults) ctx.logger.info(`ai-budget: triaged=${aiBudget.triagedScannerResults} context chars=${aiBudget.triageContextChars} estimatedTokens=${aiBudget.estimatedTriageTokens}`);
     if (aiProviders && ctx.options.aiAudit) {
       ctx.logger.info(`ai-audit: enabled maxFiles=${ctx.options.maxAiAuditFiles} maxRounds=${ctx.options.maxAiAuditRounds} maxChars=${ctx.options.maxAiAuditChars}`);
-      const auditFindings = await runExploratoryAudit(aiProviders.medium, files, scannerResults, {
+      const auditFindings = await runTargetedExploratoryAudit(aiProviders.medium, files, scannerResults, {
         maxFiles: ctx.options.maxAiAuditFiles,
         maxRounds: ctx.options.maxAiAuditRounds,
         maxChars: ctx.options.maxAiAuditChars,
-        aiInstructions: aiInstructions.content
+        aiInstructions: effectiveAiInstructions,
+        jobRecorder: aiJobRecorder,
+        vulnerabilityClasses: ctx.projectConfig.vulnerabilityClasses,
+        negativeEvidence,
+        validationPass: true,
+        parallelClassAudits: true,
+        artifactRecorder: {
+          record: (event) => {
+            auditArtifacts.push(event);
+            if (event.kind === "source-map") aiSourceMap = event.sourceMap;
+          }
+        }
       }, (message) => ctx.logger.info(message));
       findings.push(...auditFindings);
       ctx.logger.info(`ai-audit: added ${auditFindings.length} findings`);
     } else if (aiProviders) {
       ctx.logger.info("ai-audit: disabled");
     }
-    const finalFindings = applyTriageMemory(db, ctx.repoPath, scanId, attachFindingFingerprints(findings.map(classifyFindingState))).map((finding) => ({ ...finding, exploitabilityScore: localExploitabilityScore(finding) }));
+    const rememberedFindings = applyTriageMemory(db, ctx.repoPath, scanId, attachFindingFingerprints(findings.map(classifyFindingState)), files)
+      .map((finding) => ({ ...finding, exploitabilityScore: localExploitabilityScore(finding) }));
+    const deterministicFindings = dedupeFindings(rememberedFindings);
+    if (deterministicFindings.length !== rememberedFindings.length) ctx.logger.info(`noise: collapsed ${rememberedFindings.length - deterministicFindings.length} duplicate findings`);
+    const finalFindings = aiProviders
+      ? await dedupeFindingsWithAi(aiProviders.low, deterministicFindings, aiJobRecorder, (message) => ctx.logger.info(message))
+      : deterministicFindings;
+    if (finalFindings.length !== deterministicFindings.length) ctx.logger.info(`noise: AI collapsed ${deterministicFindings.length - finalFindings.length} additional duplicate findings`);
     ctx.logger.info(`triage: produced ${finalFindings.length} findings`);
     ctx.logger.info("db: storing findings");
     for (const finding of finalFindings) insertFinding(db, scanId, finding);
     ctx.logger.info("db: marking scan completed");
     finishScan(db, scanId, "completed");
     const baselineDiff = buildBaselineDiff(db, ctx.repoPath, scanId, ctx.options.baseline);
-    const bundle = { ...getScanBundle(db, scanId), toolStatuses, baselineDiff, suppressions: suppressed.summary, aiBudget, aiUsage: aiUsageTracker.summary(), aiInstructions: { path: aiInstructions.path, chars: aiInstructions.chars, loaded: Boolean(aiInstructions.path) }, projectConfig: ctx.projectConfig, incremental: { enabled: ctx.options.incremental, changedFiles: changedPaths.size, localScannerFiles: localFiles.length } };
+    const securityIntelligence = buildSecurityIntelligence(files, scannerResults, {
+      negativeEvidence: [...negativeEvidence, ...rejectedHypothesesEvidence(auditArtifacts)],
+      aiSourceMap,
+      auditArtifacts
+    });
+    const bundle = prepareReportBundle({ ...getScanBundle(db, scanId), toolStatuses, baselineDiff, suppressions: suppressed.summary, aiBudget, aiUsage: aiUsageTracker.summary(), aiJobs: aiJobRecorder.summary(), aiInstructions: { path: aiInstructions.path, chars: effectiveAiInstructions.length, loaded: Boolean(aiInstructions.path || strategyInstructions) }, projectConfig: ctx.projectConfig, scanStrategy: scanStrategyMetadata(ctx.projectConfig), securityIntelligence, incremental: { enabled: ctx.options.incremental, changedFiles: scanPlan.changedPaths.size, localScannerFiles: localFiles.length } }, files);
     ctx.logger.info(`reports: writing format=${ctx.options.format} out=${ctx.outDir}`);
     const reportFiles = writeReports(ctx.outDir, ctx.options.format, bundle, warnings);
     for (const file of reportFiles) ctx.logger.info(`reports: wrote ${file}`);
@@ -230,6 +284,7 @@ async function runAiTriageBatches(input: {
   targetActiveFindings: number;
   log: (message: string) => void;
   aiBudget: { triageContextChars: number; triagedScannerResults: number };
+  aiJobRecorder?: AiJobRecorder;
 }): Promise<Finding[]> {
   const batchSize = 25;
   const findings: Finding[] = [];
@@ -253,7 +308,8 @@ async function runAiTriageBatches(input: {
         input.providers.critic,
         resolveRequestedContext,
         [formatTriageLabel(result, absoluteIndex, input.candidates.length)],
-        input.providers.low
+        input.providers.low,
+        input.aiJobRecorder
       ));
     }
     if (input.targetActiveFindings > 0 && activeFindingCount(findings) >= input.targetActiveFindings) {
@@ -331,7 +387,8 @@ function localExploitabilityScore(finding: Finding): number {
   return Math.max(0, Math.min(100, Math.round(score)));
 }
 
-function classifyFindingState(finding: Finding): Finding {
+export function classifyFindingState(finding: Finding): Finding {
+  if (finding.status === "confirmed_true_positive" || finding.status === "likely_true_positive" || finding.status === "security_hotspot" || finding.status === "needs_context") return finding;
   if (finding.status === "false_positive") return finding;
   if (finding.status === "needs_dynamic_test") return { ...finding, status: "security_hotspot" };
   if (finding.status === "confirmed" && ["confirmed", "high"].includes(finding.confidence)) return { ...finding, status: "confirmed_true_positive" };
@@ -340,26 +397,39 @@ function classifyFindingState(finding: Finding): Finding {
   return finding;
 }
 
-function applyTriageMemory(db: ReturnType<typeof openDatabase>, repoPath: string, scanId: string, findings: Finding[]): Finding[] {
+export interface RememberedFindingState {
+  status: Finding["status"];
+  reasoning?: string;
+  fileSha256?: string | null;
+}
+
+export function applyRememberedFindingState(finding: Finding, remembered: RememberedFindingState | undefined, currentFileSha256?: string): Finding {
+  if (!remembered) return finding;
+  if (!remembered.fileSha256 || !currentFileSha256 || remembered.fileSha256 !== currentFileSha256) return finding;
+  if (remembered.status === "false_positive") {
+    return { ...finding, status: "false_positive", confidence: "low", reasoning: `${finding.reasoning}\nTriage memory: previous scan marked this fingerprint false_positive. ${remembered.reasoning ?? ""}` };
+  }
+  if (remembered.status === "confirmed_true_positive" || remembered.status === "confirmed") {
+    return { ...finding, status: "confirmed_true_positive", confidence: finding.confidence === "low" ? "medium" : finding.confidence, reasoning: `${finding.reasoning}\nTriage memory: previous scan confirmed this fingerprint as true positive.` };
+  }
+  return finding;
+}
+
+function applyTriageMemory(db: ReturnType<typeof openDatabase>, repoPath: string, scanId: string, findings: Finding[], files: IndexedFile[]): Finding[] {
   const rows = db.prepare(`
-    SELECT f.fingerprint, f.status, f.reasoning
+    SELECT f.fingerprint, f.status, f.reasoning, old_file.sha256 AS fileSha256
     FROM findings f
     JOIN scans s ON s.id = f.scan_id
+    LEFT JOIN files old_file ON old_file.scan_id = f.scan_id AND old_file.path = f.path
     WHERE s.repo_path = ? AND f.scan_id != ? AND f.fingerprint IS NOT NULL
     ORDER BY s.started_at DESC
-  `).all(repoPath, scanId) as Array<{ fingerprint: string; status: Finding["status"]; reasoning?: string }>;
-  const memory = new Map<string, { status: Finding["status"]; reasoning?: string }>();
+  `).all(repoPath, scanId) as Array<{ fingerprint: string; status: Finding["status"]; reasoning?: string; fileSha256?: string | null }>;
+  const memory = new Map<string, RememberedFindingState>();
   for (const row of rows) if (!memory.has(row.fingerprint)) memory.set(row.fingerprint, row);
+  const currentHashes = new Map(files.map((file) => [file.path, sha256(file.content)]));
   return findings.map((finding) => {
     const remembered = finding.fingerprint ? memory.get(finding.fingerprint) : undefined;
-    if (!remembered) return finding;
-    if (remembered.status === "false_positive") {
-      return { ...finding, status: "false_positive", confidence: "low", reasoning: `${finding.reasoning}\nTriage memory: previous scan marked this fingerprint false_positive. ${remembered.reasoning ?? ""}` };
-    }
-    if (remembered.status === "confirmed_true_positive" || remembered.status === "confirmed") {
-      return { ...finding, status: "confirmed_true_positive", confidence: finding.confidence === "low" ? "medium" : finding.confidence, reasoning: `${finding.reasoning}\nTriage memory: previous scan confirmed this fingerprint as true positive.` };
-    }
-    return finding;
+    return applyRememberedFindingState(finding, remembered, finding.path ? currentHashes.get(finding.path) : undefined);
   });
 }
 
@@ -429,4 +499,16 @@ function failExitCode(findings: Array<{ severity: string }>, failOn: string): nu
   if (failOn === "none") return 0;
   const threshold = SEVERITY_ORDER.indexOf(failOn as any);
   return findings.some((finding) => SEVERITY_ORDER.indexOf(finding.severity as any) <= threshold) ? 2 : 0;
+}
+
+function rejectedHypothesesEvidence(events: AiAuditArtifactEvent[]): Array<{ title: string; path?: string | null; startLine?: number | null; reason: string; status: string }> {
+  return events.flatMap((event) => event.kind === "round"
+    ? event.rejectedHypotheses.map((item) => ({
+      title: item.title,
+      path: item.path,
+      startLine: null,
+      reason: item.reason,
+      status: "rejected_hypothesis"
+    }))
+    : []);
 }

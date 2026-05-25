@@ -1,5 +1,6 @@
 import type { IndexedFile } from "../repo/repoIndexer.js";
 import type { ScannerResult } from "./types.js";
+import { analyzeDependencyReachability, packageNameFromResult } from "../repo/dependencyReachability.js";
 
 interface Evidence {
   path?: string;
@@ -134,32 +135,38 @@ function prototypePollutionToEtaRce(scannerResults: ScannerResult[]): ScannerRes
 function reachableDependencyFindings(files: IndexedFile[], scannerResults: ScannerResult[]): ScannerResult[] {
   const results: ScannerResult[] = [];
   for (const result of scannerResults.filter(isDependencyVulnerability)) {
-    const packageName = packageNameFromResult(result);
+    const reachability = analyzeDependencyReachability(files, result);
+    const packageName = reachability.packageName;
     if (!packageName || packageName === "unknown") continue;
-    const usage = findPackageUsage(files, packageName);
+    const usage = reachability.vulnerableApiUsages.length ? reachability.vulnerableApiUsages : reachability.packageUsages;
     if (!usage.length) continue;
     const impact = dependencyImpact(result);
     const firstUsage = usage[0];
+    const exactApi = reachability.vulnerableApiUsages[0]?.api;
     results.push(correlationResult({
-      ruleId: `reachable-${impact}-${safeRulePart(packageName)}`,
-      title: `Reachable vulnerable dependency: ${packageName}`,
+      ruleId: exactApi ? `reachable-vulnerable-api-${safeRulePart(packageName)}-${safeRulePart(exactApi)}` : `reachable-${impact}-${safeRulePart(packageName)}`,
+      title: exactApi ? `Reachable vulnerable API: ${packageName}.${exactApi}` : `Reachable vulnerable dependency: ${packageName}`,
       category: impact === "rce" ? "rce" : "dependency-reachability",
       severity: result.severity,
       path: firstUsage.path ?? result.path,
       line: firstUsage.line ?? result.startLine,
-      message: `Dependency scanner reported ${packageName}, and indexed source imports or references it. Treat exploitability as more likely than an unused transitive dependency.`,
+      message: exactApi
+        ? `Dependency scanner reported ${packageName}, and indexed source calls vulnerable API ${exactApi}. Treat this as stronger reachability evidence than package presence alone.`
+        : `Dependency scanner reported ${packageName}, and indexed source imports or references it. Treat exploitability as more likely than an unused transitive dependency.`,
       evidence: [
         { path: result.path, line: result.startLine, note: `${result.scanner}/${result.ruleId}: ${result.title}` },
-        ...usage.slice(0, 4)
+        ...usage.slice(0, 4).map((item) => ({ path: item.path, line: item.line, note: `${item.api ? `${item.api}: ` : ""}${item.code}` }))
       ],
       related: [result],
       attackChain: {
-        kind: "reachable-vulnerable-dependency",
-        impact: impact === "rce" ? "Possible reachable dependency RCE path." : "Vulnerable dependency appears used by application code.",
-        confidence: "medium",
+        kind: exactApi ? "reachable-vulnerable-api" : "reachable-vulnerable-dependency",
+        impact: exactApi
+          ? `Vulnerable dependency API ${packageName}.${exactApi} appears used by application code.`
+          : impact === "rce" ? "Possible reachable dependency RCE path." : "Vulnerable dependency appears used by application code.",
+        confidence: exactApi ? "high" : "medium",
         steps: [
           `Dependency scanner reported vulnerable package ${packageName}.`,
-          "Application source imports or references that package.",
+          exactApi ? `Application source calls vulnerable API ${exactApi}.` : "Application source imports or references that package.",
           "Exploitability depends on whether vulnerable API and attacker-controlled data reach each other."
         ],
         validation: [
@@ -239,11 +246,6 @@ function isDependencyVulnerability(result: ScannerResult): boolean {
   if (result.scanner !== "trivy" && result.scanner !== "osv-scanner") return false;
   const raw = result.raw && typeof result.raw === "object" ? result.raw as Record<string, unknown> : {};
   return Boolean(raw.VulnerabilityID || raw.id || /^CVE-\d{4}-\d+$/i.test(result.ruleId) || /^GHSA-/i.test(result.ruleId));
-}
-
-function packageNameFromResult(result: ScannerResult): string {
-  const raw = result.raw && typeof result.raw === "object" ? result.raw as Record<string, any> : {};
-  return String(raw.PkgName ?? raw.package?.name ?? raw.Package?.Name ?? raw.name ?? raw.PackageName ?? result.title.split(":")[0] ?? "unknown").trim();
 }
 
 function dependencyImpact(result: ScannerResult): string {

@@ -7,13 +7,31 @@ import { safeJsonParse } from "../utils/safeJson.js";
 import { extractImports } from "../repo/importGraph.js";
 import { detectRoutes } from "../repo/routeDetector.js";
 import { extractSymbols } from "../repo/symbolExtractor.js";
+import { classifyFileRole, fileRoleScore, isReusableOrGeneratedRole } from "../repo/fileRole.js";
 import { lineSlice } from "../utils/lineMap.js";
 import type { AiProvider } from "./types.js";
-import { auditResponseJsonSchema, categoryValues, confidenceValues, severityValues, statusValues } from "./schemas.js";
+import { auditCategoriesForClasses, auditResponseJsonSchemaForClasses, auditSourceMapJsonSchema, auditValidationJsonSchema, categoryValues, confidenceValues, severityValues, statusValues, type AiJsonSchema } from "./schemas.js";
+import type { AiJobRecorder } from "./jobs.js";
+import type { VulnerabilityClass } from "../config/projectConfig.js";
+import { normalizeAuditResponseJson } from "./jsonNormalize.js";
 
 const DEFAULT_AUDIT_REQUEST_CHAR_BUDGET = 60_000;
 const AUDIT_PROMPT_OVERHEAD_CHARS = 12_000;
 const AUDIT_CHUNK_LINES = 180;
+const DEFAULT_AUDIT_CLASSES: VulnerabilityClass[] = [
+  "auth",
+  "authz",
+  "ssrf",
+  "injection",
+  "xss",
+  "exposure",
+  "validation",
+  "dependency",
+  "crypto",
+  "misconfig",
+  "xxe",
+  "business-logic"
+];
 
 const auditFindingSchema = z.object({
   title: z.string(),
@@ -48,13 +66,71 @@ const auditToolCallSchema = z.object({
   reason: z.string().default("")
 });
 
+const auditHypothesisSchema = z.object({
+  id: z.string(),
+  vulnerabilityClass: z.string(),
+  title: z.string(),
+  path: z.string(),
+  source: z.string(),
+  sink: z.string(),
+  evidence: z.array(z.object({ path: z.string(), line: z.number().int().positive(), note: z.string() })).default([]),
+  status: z.enum(["candidate", "validated", "rejected"]),
+  reason: z.string()
+});
+
+const rejectedHypothesisSchema = z.object({
+  id: z.string(),
+  title: z.string(),
+  path: z.string(),
+  reason: z.string()
+});
+
 const auditResponseSchema = z.object({
   summary: z.string().default(""),
   requestedFiles: z.array(z.string()).default([]),
   toolCalls: z.array(auditToolCallSchema).default([]),
   complete: z.boolean().default(false),
+  hypotheses: z.array(auditHypothesisSchema).default([]),
+  rejectedHypotheses: z.array(rejectedHypothesisSchema).default([]),
   findings: z.array(auditFindingSchema).default([])
 });
+
+const auditCatalogItemSchema = z.object({
+  name: z.string(),
+  path: z.string(),
+  line: z.number().int().positive().nullable().default(null),
+  category: z.string().default("security"),
+  evidence: z.string().default("")
+});
+
+const auditSourceMapSchema = z.object({
+  summary: z.string().default(""),
+  globalPriorityFiles: z.array(z.string()).default([]),
+  priorityFilesByClass: z.record(z.array(z.string())).default({}),
+  notes: z.array(z.string()).default([]),
+  catalog: z.object({
+    sources: z.array(auditCatalogItemSchema).default([]),
+    sinks: z.array(auditCatalogItemSchema).default([]),
+    sanitizers: z.array(auditCatalogItemSchema).default([]),
+    guards: z.array(auditCatalogItemSchema).default([])
+  }).default({ sources: [], sinks: [], sanitizers: [], guards: [] })
+});
+
+const auditValidationResponseSchema = z.object({
+  decisions: z.array(z.object({
+    findingIndex: z.number().int().min(0),
+    verdict: z.enum(["keep", "downgrade", "reject"]),
+    revisedStatus: z.enum(statusValues),
+    revisedConfidence: z.enum(confidenceValues),
+    reasons: z.array(z.string()).default([])
+  })).default([])
+});
+
+type AuditSourceMap = z.infer<typeof auditSourceMapSchema>;
+type ValidationIssue = { path: Array<string | number>; message: string };
+type ParseResult<T> = { ok: true; data: T } | { ok: false; issues: ValidationIssue[] };
+
+const AI_JSON_RETRY_ATTEMPTS = 2;
 
 export interface AiExploratoryAuditOptions {
   maxFiles: number;
@@ -62,7 +138,34 @@ export interface AiExploratoryAuditOptions {
   maxChars: number;
   maxRequestChars?: number;
   aiInstructions?: string;
+  jobRecorder?: AiJobRecorder;
+  vulnerabilityClasses?: VulnerabilityClass[];
+  sourceMap?: AuditSourceMap;
+  priorityFiles?: string[];
+  negativeEvidence?: Array<{ title: string; path?: string | null; startLine?: number | null; reason: string; status: string; fingerprint?: string | null }>;
+  artifactRecorder?: AiAuditArtifactRecorder;
+  validationPass?: boolean;
+  parallelClassAudits?: boolean;
 }
+
+export interface AiAuditArtifactRecorder {
+  record(event: AiAuditArtifactEvent): void;
+}
+
+export type AiAuditArtifactEvent =
+  | { kind: "source-map"; sourceMap: AuditSourceMap }
+  | { kind: "class-start"; vulnerabilityClass: VulnerabilityClass; priorityFiles: string[] }
+  | { kind: "class-complete"; vulnerabilityClass: VulnerabilityClass; findingCount: number }
+  | {
+    kind: "round";
+    vulnerabilityClass?: VulnerabilityClass;
+    round: number;
+    hypothesisCount: number;
+    rejectedHypothesisCount: number;
+    findingCount: number;
+    hypotheses: Array<z.infer<typeof auditHypothesisSchema>>;
+    rejectedHypotheses: Array<z.infer<typeof rejectedHypothesisSchema>>;
+  };
 
 interface ManifestEntry {
   path: string;
@@ -111,11 +214,13 @@ export async function runExploratoryAudit(
   const allowed = new Map(candidates.map((file) => [file.path, file]));
   const importGraph = buildImportGraph(candidates, files);
   const chunks = buildAuditChunks(candidates);
-  const traversal = createAuditTraversal(candidates, scannerResults, importGraph, chunks);
+  const traversal = createAuditTraversal(candidates, scannerResults, importGraph, chunks, options.priorityFiles ?? []);
   const memory: AuditMemory = { inspectedFiles: new Set(), inspectedRanges: new Map(), notes: [] };
   const findings: Finding[] = [];
   const requestCharBudget = auditRequestCharBudget(options);
   const systemPrompt = buildAuditSystemPrompt();
+  const responseSchema = auditResponseJsonSchemaForClasses(options.vulnerabilityClasses ?? []);
+  const promptCategories = auditCategoriesForClasses(options.vulnerabilityClasses ?? []);
   const initialPrompt = buildInitialPrompt(manifest, options, Math.max(2_000, Math.floor((requestCharBudget - systemPrompt.length) * 0.32)));
   let remainingChars = options.maxChars;
   let requested = traversal.next(memory, 6, options.maxFiles);
@@ -140,8 +245,21 @@ export async function runExploratoryAudit(
     traversal.enqueueImports(pack.files.map((file) => file.path));
     remainingChars -= pack.charCount;
     log(`ai-audit: round ${round}/${options.maxRounds} sending chunks=${pack.files.length} inspectedFiles=${memory.inspectedFiles.size}/${options.maxFiles} chars=${pack.charCount} remaining=${remainingChars}`);
-    const parsed = await requestAuditRound(provider, systemPrompt, initialPrompt, buildAuditRoundPrompt(pack, memory), log, round);
-    const validFindings = parsed.findings.filter((finding) => isSupportedAuditFinding(finding, allowed, memory));
+    const parsed = await requestAuditRound(provider, systemPrompt, initialPrompt, buildAuditRoundPrompt(pack, memory, promptCategories), responseSchema, log, round, options.jobRecorder);
+    options.artifactRecorder?.record({
+      kind: "round",
+      vulnerabilityClass: options.vulnerabilityClasses?.[0],
+      round,
+      hypothesisCount: parsed.hypotheses.length,
+      rejectedHypothesisCount: parsed.rejectedHypotheses.length,
+      findingCount: parsed.findings.length,
+      hypotheses: parsed.hypotheses,
+      rejectedHypotheses: parsed.rejectedHypotheses
+    });
+    let validFindings = parsed.findings.filter((finding) => isSupportedAuditFinding(finding, allowed, memory));
+    if (options.validationPass && validFindings.length) {
+      validFindings = await validateAuditFindingsWithAi(provider, validFindings, pack, memory, responseSchema, log, round, options.jobRecorder);
+    }
     const dropped = parsed.findings.length - validFindings.length;
     if (dropped) log(`ai-audit: round ${round}/${options.maxRounds} dropped unsupported findings=${dropped}`);
     findings.push(...validFindings.map((finding) => toFinding(finding)));
@@ -158,35 +276,626 @@ export async function runExploratoryAudit(
   return dedupeFindings(findings);
 }
 
-async function requestAuditRound(provider: AiProvider, systemPrompt: string, manifestPrompt: string, roundPrompt: string, log: (message: string) => void, round: number): Promise<z.infer<typeof auditResponseSchema>> {
-  const output = await provider.complete({
-    system: systemPrompt,
-    messages: [
-      { role: "user", content: manifestPrompt },
-      { role: "user", content: roundPrompt }
-    ],
-    jsonSchema: auditResponseJsonSchema,
-    temperature: 0,
-    maxTokens: 3500
-  });
-  const parsed = normalizeAuditResponse(safeJsonParse(output.text));
-  let checked = auditResponseSchema.safeParse(parsed);
-  if (!checked.success) {
+export async function runTargetedExploratoryAudit(
+  provider: AiProvider,
+  files: IndexedFile[],
+  scannerResults: ScannerResult[],
+  options: AiExploratoryAuditOptions,
+  log: (message: string) => void = () => undefined
+): Promise<Finding[]> {
+  const classes = options.vulnerabilityClasses?.length ? options.vulnerabilityClasses : DEFAULT_AUDIT_CLASSES;
+  const scannerSeedMap = scannerSeedSourceMap(scannerResults, files, classes);
+  const aiSourceMap = await runAuditSourceMap(provider, files, scannerResults, { ...options, vulnerabilityClasses: classes, sourceMap: scannerSeedMap }, log);
+  const sourceMap = mergeSourceMaps(scannerSeedMap, aiSourceMap);
+  options.artifactRecorder?.record({ kind: "source-map", sourceMap });
+  const maxRoundsPerClass = Math.max(1, options.maxRounds);
+  const maxFilesPerClass = Math.max(1, Math.ceil(options.maxFiles / Math.max(1, classes.length)));
+  const maxCharsPerClass = Math.max(12_000, Math.ceil(options.maxChars / Math.max(1, classes.length)));
+  const runClassAudit = async (vulnerabilityClass: VulnerabilityClass): Promise<Finding[]> => {
+    const priorityFiles = sourceMapPriorityFiles(sourceMap, vulnerabilityClass);
+    options.artifactRecorder?.record({ kind: "class-start", vulnerabilityClass, priorityFiles });
+    log(`ai-audit: class=${vulnerabilityClass} start maxFiles=${maxFilesPerClass} maxRounds=${maxRoundsPerClass} maxChars=${maxCharsPerClass}`);
+    const classFindings = await runExploratoryAudit(provider, files, scannerResults, {
+      ...options,
+      maxFiles: maxFilesPerClass,
+      maxRounds: maxRoundsPerClass,
+      maxChars: maxCharsPerClass,
+      vulnerabilityClasses: [vulnerabilityClass],
+      sourceMap,
+      priorityFiles
+    }, log);
+    options.artifactRecorder?.record({ kind: "class-complete", vulnerabilityClass, findingCount: classFindings.length });
+    return classFindings;
+  };
+  const findings = options.parallelClassAudits
+    ? (await Promise.all(classes.map(runClassAudit))).flat()
+    : (await sequence(classes, runClassAudit)).flat();
+  return dedupeFindings(findings);
+}
+
+async function runAuditSourceMap(provider: AiProvider, files: IndexedFile[], scannerResults: ScannerResult[], options: AiExploratoryAuditOptions, log: (message: string) => void): Promise<AuditSourceMap> {
+  const candidates = files.filter(isAuditableFile);
+  const allowedPaths = new Set(candidates.map((file) => file.path));
+  const manifest = buildManifest(candidates, scannerResults, files);
+  const systemPrompt = buildSourceMapSystemPrompt();
+  const userPrompt = buildSourceMapUserPrompt(manifest, options);
+  const jobId = options.jobRecorder?.start("audit", "source-map", { provider: provider.name, classes: options.vulnerabilityClasses ?? [] });
+  try {
+    log(`ai-audit: source-map start files=${candidates.length}`);
+    let lastOutput = "";
+    let lastIssues: ValidationIssue[] = [{ path: [], message: "No source-map response was received" }];
+    for (let attempt = 1; attempt <= AI_JSON_RETRY_ATTEMPTS; attempt++) {
+      const prompt = attempt === 1 ? userPrompt : buildSourceMapRetryPrompt(userPrompt, lastOutput, lastIssues);
+      const output = await provider.complete({
+        system: systemPrompt,
+        messages: [{ role: "user", content: prompt }],
+        jsonSchema: auditSourceMapJsonSchema,
+        temperature: 0,
+        maxTokens: 2600
+      });
+      options.jobRecorder?.trace(jobId, { label: attempt === 1 ? "source-map" : `source-map-retry-${attempt}`, prompt: `${systemPrompt}\n\n${prompt}`, response: output.text });
+      const parsed = parseSourceMapResponse(output.text);
+      if (parsed.ok) {
+        const sourceMap = sanitizeSourceMap(parsed.data, allowedPaths);
+        log(`ai-audit: source-map priorityFiles=${sourceMap.globalPriorityFiles.length} notes=${sourceMap.notes.length}`);
+        options.jobRecorder?.succeed(jobId, { valid: true, priorityFiles: sourceMap.globalPriorityFiles.length, notes: sourceMap.notes.length });
+        return sourceMap;
+      }
+      lastOutput = output.text;
+      lastIssues = parsed.issues;
+      if (attempt < AI_JSON_RETRY_ATTEMPTS) {
+        log(`ai-audit: source-map invalid, retrying attempt ${attempt + 1}/${AI_JSON_RETRY_ATTEMPTS}`);
+      }
+    }
+    if (lastOutput.trim()) {
+      log("ai-audit: source-map invalid, repairing");
+      const repairPrompt = buildSourceMapRepairPrompt(lastOutput, lastIssues);
+      const repair = await provider.complete({
+        system: "Repair invalid source-map JSON to match the strict JSON schema exactly. Output raw JSON only. No prose, markdown, comments, code fences, or extra keys. Use exact paths present in the invalid JSON only.",
+        messages: [{ role: "user", content: repairPrompt }],
+        jsonSchema: auditSourceMapJsonSchema,
+        temperature: 0,
+        maxTokens: 2200
+      });
+      options.jobRecorder?.trace(jobId, { label: "source-map-repair", prompt: repairPrompt, response: repair.text });
+      const repaired = parseSourceMapResponse(repair.text);
+      if (repaired.ok) {
+        const sourceMap = sanitizeSourceMap(repaired.data, allowedPaths);
+        log(`ai-audit: source-map priorityFiles=${sourceMap.globalPriorityFiles.length} notes=${sourceMap.notes.length}`);
+        options.jobRecorder?.succeed(jobId, { valid: true, repaired: true, priorityFiles: sourceMap.globalPriorityFiles.length, notes: sourceMap.notes.length });
+        return sourceMap;
+      }
+    }
+    log("ai-audit: source-map invalid, continuing without AI source map");
+    options.jobRecorder?.succeed(jobId, { valid: false });
+    return emptySourceMap();
+  } catch (error) {
+    log(`ai-audit: source-map failed: ${error instanceof Error ? error.message : String(error)}`);
+    options.jobRecorder?.fail(jobId, error);
+    return emptySourceMap();
+  }
+}
+
+function buildSourceMapSystemPrompt(): string {
+  return [
+    "Role: senior security reconnaissance engineer.",
+    "Goal: create a compact source map that will steer later class-specific audit passes.",
+    "Choose files that are security-relevant because they contain entrypoints, auth/session logic, authorization checks, trust boundaries, dangerous sinks, data access, uploads, redirects, outbound requests, or template rendering.",
+    "Keep output compact: at most 20 global priority files, 8 files per class, and 12 notes.",
+    "If uncertain, choose the most obvious entrypoints, controllers, services, middleware, route handlers, and template files. Do not return an empty response.",
+    "Return raw JSON only: {summary, globalPriorityFiles, priorityFilesByClass, notes}.",
+    "No prose, markdown, comments, code fences, or extra keys."
+  ].join("\n");
+}
+
+function buildSourceMapUserPrompt(manifest: ManifestEntry[], options: AiExploratoryAuditOptions): string {
+  const classes = options.vulnerabilityClasses?.length ? options.vulnerabilityClasses : DEFAULT_AUDIT_CLASSES;
+  return `Build a security source map from this repository manifest.
+
+Vulnerability classes to support: ${classes.join(", ")}
+
+Repository AI instructions:
+${options.aiInstructions || "None supplied."}
+
+Static scanner seed files:
+${formatStaticSeedsForPrompt(options.sourceMap)}
+
+Negative evidence memory:
+${formatNegativeEvidenceForPrompt(options.negativeEvidence)}
+
+Return exact paths from the manifest only.
+
+JSON shape:
+{
+  "summary": "short architecture and risk summary",
+  "globalPriorityFiles": ["exact/path.ts"],
+  "priorityFilesByClass": {
+    "auth": ["exact/auth/path.ts"],
+    "authz": ["exact/authz/path.ts"],
+    "ssrf": ["exact/http/client.ts"],
+    "injection": ["exact/db/or/shell/path.ts"],
+    "xss": ["exact/template/path.ts"],
+    "exposure": ["exact/export/or/log/path.ts"],
+    "validation": ["exact/upload/or/redirect/path.ts"],
+    "dependency": ["exact/package/usage/path.ts"],
+    "crypto": ["exact/crypto/path.ts"],
+    "misconfig": ["exact/config/path.ts"],
+    "xxe": ["exact/xml/upload/path.ts"],
+    "business-logic": ["exact/order/basket/payment/path.ts"]
+  },
+  "notes": ["short note used by later audit passes"],
+  "catalog": {
+    "sources": [{"name":"custom source/helper", "path":"exact/path.ts", "line":1, "category":"request/session/file", "evidence":"why this is a source"}],
+    "sinks": [{"name":"custom sink/helper", "path":"exact/path.ts", "line":1, "category":"ssrf/sql/xss/authz", "evidence":"why this is a sink"}],
+    "sanitizers": [{"name":"custom sanitizer/helper", "path":"exact/path.ts", "line":1, "category":"html/sql/url/path/authz", "evidence":"what it guarantees"}],
+    "guards": [{"name":"custom guard/helper", "path":"exact/path.ts", "line":1, "category":"auth/authz/tenant/csrf", "evidence":"what it enforces"}]
+  }
+}
+
+Manifest:
+${formatManifestForPrompt(manifest, 12_000)}`;
+}
+
+function sourceMapPriorityFiles(sourceMap: AuditSourceMap, vulnerabilityClass: VulnerabilityClass): string[] {
+  return [...new Set([
+    ...(sourceMap.priorityFilesByClass[vulnerabilityClass] ?? []),
+    ...sourceMap.globalPriorityFiles
+  ])];
+}
+
+function scannerSeedSourceMap(scannerResults: ScannerResult[], files: IndexedFile[], classes: VulnerabilityClass[]): AuditSourceMap {
+  const allowedPaths = new Set(files.filter(isAuditableFile).map((file) => file.path));
+  const classSet = new Set(classes);
+  const ranked = scannerResults
+    .filter((result) => result.path && allowedPaths.has(normalizePath(result.path)))
+    .filter((result) => result.severity === "critical" || result.severity === "high" || result.scanner === "source-patterns")
+    .sort((a, b) => scannerSeedScore(b) - scannerSeedScore(a))
+    .slice(0, 80);
+  const globalPriorityFiles = unique(ranked.map((result) => normalizePath(result.path!))).slice(0, 30);
+  const priorityFilesByClass: Record<string, string[]> = {};
+  for (const result of ranked) {
+    const filePath = normalizePath(result.path!);
+    for (const vulnerabilityClass of classesForScannerSeed(result)) {
+      if (!classSet.has(vulnerabilityClass)) continue;
+      priorityFilesByClass[vulnerabilityClass] = unique([...(priorityFilesByClass[vulnerabilityClass] ?? []), filePath]).slice(0, 12);
+    }
+  }
+  return {
+    summary: globalPriorityFiles.length ? "Deterministic scanner seed files available for class-focused audit." : "",
+    globalPriorityFiles,
+    priorityFilesByClass,
+    notes: ranked.slice(0, 20).map((result) => `${result.scanner}/${result.ruleId} ${result.category ?? "security"} ${normalizePath(result.path ?? "")}:${result.startLine ?? "?"}`),
+    catalog: { sources: [], sinks: [], sanitizers: [], guards: [] }
+  };
+}
+
+function scannerSeedScore(result: ScannerResult): number {
+  const severityScore: Record<string, number> = { critical: 100, high: 80, medium: 45, low: 10, info: 0 };
+  let score = severityScore[result.severity] ?? 0;
+  if (result.scanner === "source-patterns") score += 40;
+  if (String(JSON.stringify(result.raw ?? {})).includes("sourceLine")) score += 10;
+  score += fileRoleScore(classifyFileRole(result.path ?? ""));
+  return score;
+}
+
+function classesForScannerSeed(result: ScannerResult): VulnerabilityClass[] {
+  const text = `${result.scanner} ${result.ruleId} ${result.title} ${result.category ?? ""} ${result.message}`.toLowerCase();
+  const classes = new Set<VulnerabilityClass>();
+  if (/\bxxe|xml|entity|noent|parsexml\b/.test(text)) classes.add("xxe");
+  if (/\bsql|nosql|\$where|command|cmd|exec|eval|template|ssti|deserial|prototype|injection|rce\b/.test(text)) classes.add("injection");
+  if (/\bxss|html|script|template|innerhtml\b/.test(text)) classes.add("xss");
+  if (/\bssrf|fetch|axios|metadata|webhook|url\b/.test(text)) classes.add("ssrf");
+  if (/\bauthentication|login|session|csrf|jwt|password|credential\b/.test(text)) classes.add("auth");
+  if (/\bauthorization|authz|access|tenant|idor|owner|permission|role|admin|object\b/.test(text)) classes.add("authz");
+  if (/\bbusiness|basket|cart|order|checkout|payment|coupon|discount|review|feedback|price|quantity|workflow\b/.test(text)) classes.add("business-logic");
+  if (/\bpath|traversal|redirect|upload|file|archive|zip|validation|mime|extension\b/.test(text)) classes.add("validation");
+  if (/\bsecret|credential|token|api[_ -]?key|log|debug|exposure|disclosure\b/.test(text)) classes.add("exposure");
+  if (/\bcrypto|md5|sha1|cipher|encrypt|decrypt|tls|ssl|signature|hmac\b/.test(text)) classes.add("crypto");
+  if (/\bcors|config|misconfig|helmet|cookie|header|debug|default\b/.test(text)) classes.add("misconfig");
+  if (/\bdependency|package|cve|ghsa|supply chain\b/.test(text)) classes.add("dependency");
+  return classes.size ? [...classes] : ["validation"];
+}
+
+function mergeSourceMaps(primary: AuditSourceMap, secondary: AuditSourceMap): AuditSourceMap {
+  const priorityFilesByClass: Record<string, string[]> = {};
+  for (const key of unique([...Object.keys(primary.priorityFilesByClass), ...Object.keys(secondary.priorityFilesByClass)])) {
+    priorityFilesByClass[key] = unique([...(primary.priorityFilesByClass[key] ?? []), ...(secondary.priorityFilesByClass[key] ?? [])]).slice(0, 40);
+  }
+  return {
+    summary: [primary.summary, secondary.summary].filter(Boolean).join(" "),
+    globalPriorityFiles: unique([...primary.globalPriorityFiles, ...secondary.globalPriorityFiles]).slice(0, 40),
+    priorityFilesByClass,
+    notes: unique([...primary.notes, ...secondary.notes]).slice(0, 30),
+    catalog: {
+      sources: mergeCatalogItems(primary.catalog.sources, secondary.catalog.sources),
+      sinks: mergeCatalogItems(primary.catalog.sinks, secondary.catalog.sinks),
+      sanitizers: mergeCatalogItems(primary.catalog.sanitizers, secondary.catalog.sanitizers),
+      guards: mergeCatalogItems(primary.catalog.guards, secondary.catalog.guards)
+    }
+  };
+}
+
+function mergeCatalogItems<T extends { path: string; line: number | null; name: string }>(a: T[], b: T[]): T[] {
+  const seen = new Set<string>();
+  return [...a, ...b].filter((item) => {
+    const key = `${item.path}:${item.line ?? ""}:${item.name}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  }).slice(0, 80);
+}
+
+function formatStaticSeedsForPrompt(sourceMap: AuditSourceMap | undefined): string {
+  if (!sourceMap || (!sourceMap.globalPriorityFiles.length && !Object.keys(sourceMap.priorityFilesByClass).length && !sourceMap.notes.length)) return "None.";
+  return JSON.stringify({
+    globalPriorityFiles: sourceMap.globalPriorityFiles,
+    priorityFilesByClass: sourceMap.priorityFilesByClass,
+    notes: sourceMap.notes.slice(0, 20)
+  }, null, 2);
+}
+
+function formatNegativeEvidenceForPrompt(negativeEvidence: AiExploratoryAuditOptions["negativeEvidence"]): string {
+  if (!negativeEvidence?.length) return "None.";
+  return JSON.stringify(negativeEvidence.slice(0, 40).map((item) => ({
+    title: item.title,
+    path: item.path ?? "",
+    startLine: item.startLine ?? null,
+    status: item.status,
+    reason: item.reason.slice(0, 500)
+  })), null, 2);
+}
+
+function sanitizeSourceMap(sourceMap: AuditSourceMap, allowedPaths: Set<string>): AuditSourceMap {
+  const keepPaths = (paths: string[]) => [...new Set(paths.map(normalizePath).filter((filePath) => allowedPaths.has(filePath)))].slice(0, 40);
+  const priorityFilesByClass = Object.fromEntries(
+    Object.entries(sourceMap.priorityFilesByClass)
+      .map(([key, paths]) => [key, keepPaths(paths)])
+      .filter(([, paths]) => paths.length)
+  );
+  return {
+    summary: sourceMap.summary.slice(0, 1200),
+    globalPriorityFiles: keepPaths(sourceMap.globalPriorityFiles),
+    priorityFilesByClass,
+    notes: sourceMap.notes.map((note) => note.slice(0, 500)).slice(0, 30),
+    catalog: sanitizeCatalog(sourceMap.catalog, allowedPaths)
+  };
+}
+
+function emptySourceMap(): AuditSourceMap {
+  return { summary: "", globalPriorityFiles: [], priorityFilesByClass: {}, notes: [], catalog: { sources: [], sinks: [], sanitizers: [], guards: [] } };
+}
+
+function sanitizeCatalog(catalog: AuditSourceMap["catalog"], allowedPaths: Set<string>): AuditSourceMap["catalog"] {
+  const keep = (items: AuditSourceMap["catalog"]["sources"]) => items
+    .map((item) => ({ ...item, path: normalizePath(item.path), evidence: item.evidence.slice(0, 500), name: item.name.slice(0, 160), category: item.category.slice(0, 80) }))
+    .filter((item) => allowedPaths.has(item.path))
+    .slice(0, 80);
+  return {
+    sources: keep(catalog.sources),
+    sinks: keep(catalog.sinks),
+    sanitizers: keep(catalog.sanitizers),
+    guards: keep(catalog.guards)
+  };
+}
+
+async function requestAuditRound(provider: AiProvider, systemPrompt: string, manifestPrompt: string, roundPrompt: string, jsonSchema: AiJsonSchema, log: (message: string) => void, round: number, jobRecorder?: AiJobRecorder): Promise<z.infer<typeof auditResponseSchema>> {
+  const jobId = jobRecorder?.start("audit", `round ${round}`, { provider: provider.name });
+  try {
+    let lastOutput = "";
+    let lastIssues: ValidationIssue[] = [{ path: [], message: "No audit response was received" }];
+    for (let attempt = 1; attempt <= AI_JSON_RETRY_ATTEMPTS; attempt++) {
+      const currentRoundPrompt = attempt === 1 ? roundPrompt : buildAuditRetryPrompt(roundPrompt, lastOutput, lastIssues);
+      const output = await provider.complete({
+        system: systemPrompt,
+        messages: [
+          { role: "user", content: manifestPrompt },
+          { role: "user", content: currentRoundPrompt }
+        ],
+        jsonSchema,
+        temperature: 0,
+        maxTokens: 3500
+      });
+      jobRecorder?.trace(jobId, { label: attempt === 1 ? "audit" : `audit-retry-${attempt}`, prompt: [systemPrompt, manifestPrompt, currentRoundPrompt].join("\n\n"), response: output.text });
+      const parsed = parseAuditResponse(output.text);
+      if (parsed.ok) {
+        jobRecorder?.succeed(jobId, { valid: true, findings: parsed.data.findings.length, requestedFiles: parsed.data.requestedFiles.length, toolCalls: parsed.data.toolCalls.length });
+        return parsed.data;
+      }
+      lastOutput = output.text;
+      lastIssues = parsed.issues;
+      if (attempt < AI_JSON_RETRY_ATTEMPTS) {
+        log(`ai-audit: round ${round} invalid JSON/schema, retrying attempt ${attempt + 1}/${AI_JSON_RETRY_ATTEMPTS}`);
+      }
+    }
+
     log(`ai-audit: round ${round} invalid JSON/schema, repairing`);
+    const repairPrompt = buildAuditRepairPrompt(lastOutput, lastIssues);
     const repair = await provider.complete({
-      system: "Repair invalid JSON to match the strict JSON schema exactly. Output raw JSON only. No prose, markdown, comments, code fences, or extra keys. Use only enum values allowed by schema.",
-      messages: [{ role: "user", content: output.text }],
-      jsonSchema: auditResponseJsonSchema,
+      system: "Repair invalid JSON to match the strict JSON schema exactly. Output raw JSON only. No prose, markdown, comments, code fences, or extra keys. Use only enum values allowed by schema. Enum fields must be single strings, never arrays.",
+      messages: [{ role: "user", content: repairPrompt }],
+      jsonSchema,
       temperature: 0,
       maxTokens: 2500
     });
-    checked = auditResponseSchema.safeParse(normalizeAuditResponse(safeJsonParse(repair.text)));
-    if (!checked.success) {
+    jobRecorder?.trace(jobId, { label: "repair", prompt: repairPrompt, response: repair.text });
+    const repaired = parseAuditResponse(repair.text);
+    if (!repaired.ok) {
       log(`ai-audit: round ${round} repair failed, continuing with no findings`);
-      return { summary: "Invalid AI audit response", requestedFiles: [], toolCalls: [], complete: false, findings: [] };
+      jobRecorder?.succeed(jobId, { valid: false, findings: 0 });
+      return { summary: "Invalid AI audit response", requestedFiles: [], toolCalls: [], complete: false, hypotheses: [], rejectedHypotheses: [], findings: [] };
+    }
+    jobRecorder?.succeed(jobId, { valid: true, repaired: true, findings: repaired.data.findings.length, requestedFiles: repaired.data.requestedFiles.length, toolCalls: repaired.data.toolCalls.length });
+    return repaired.data;
+  } catch (error) {
+    jobRecorder?.fail(jobId, error);
+    throw error;
+  }
+}
+
+async function validateAuditFindingsWithAi(
+  provider: AiProvider,
+  findings: Array<z.infer<typeof auditFindingSchema>>,
+  sourcePack: unknown,
+  memory: AuditMemory,
+  _responseSchema: AiJsonSchema,
+  log: (message: string) => void,
+  round: number,
+  jobRecorder?: AiJobRecorder
+): Promise<Array<z.infer<typeof auditFindingSchema>>> {
+  const jobId = jobRecorder?.start("audit", `validation round ${round}`, { provider: provider.name, findings: findings.length });
+  const system = [
+    "Role: security finding validation critic.",
+    "Goal: reject or downgrade exploratory audit findings unless source, sink, missing control, reachability, and sanitizer/guard mismatch are supported by supplied evidence.",
+    "Return raw JSON only. Do not add new findings."
+  ].join("\n");
+  const prompt = [
+    "Validate these candidate findings against the supplied source-pack evidence and memory.",
+    "Use findingIndex values from the candidates array.",
+    "Reject findings with invented paths/lines, missing source-to-sink evidence, sufficient sanitizer/guard evidence, test-only context, or weak exploitability.",
+    "Downgrade uncertain findings to security_hotspot or needs_context.",
+    "",
+    "Memory:",
+    JSON.stringify({
+      inspectedFiles: [...memory.inspectedFiles],
+      memoryNotes: memory.notes.slice(-30)
+    }, null, 2),
+    "",
+    "Source pack:",
+    JSON.stringify(sourcePack, null, 2),
+    "",
+    "Candidates:",
+    JSON.stringify(findings.map((finding, index) => ({ findingIndex: index, ...finding })), null, 2),
+    "",
+    "Return {\"decisions\":[{\"findingIndex\":0,\"verdict\":\"keep\",\"revisedStatus\":\"confirmed_true_positive\",\"revisedConfidence\":\"high\",\"reasons\":[\"why\"]}]}."
+  ].join("\n");
+  try {
+    const output = await provider.complete({
+      system,
+      messages: [{ role: "user", content: prompt }],
+      jsonSchema: auditValidationJsonSchema,
+      temperature: 0,
+      maxTokens: 1800
+    });
+    jobRecorder?.trace(jobId, { label: "validation", prompt: `${system}\n\n${prompt}`, response: output.text });
+    const parsed = parseAuditValidationResponse(output.text, output.parsedJson);
+    if (!parsed.ok) {
+      log(`ai-audit: validation round ${round} invalid response, keeping pre-validation findings`);
+      jobRecorder?.succeed(jobId, { valid: false, kept: findings.length });
+      return findings;
+    }
+    const decisions = new Map(parsed.data.decisions.map((decision) => [decision.findingIndex, decision]));
+    const filtered = findings.flatMap((finding, index) => {
+      const decision = decisions.get(index);
+      if (!decision) return [finding];
+      if (decision.verdict === "reject") return [];
+      return [{
+        ...finding,
+        status: decision.revisedStatus,
+        confidence: decision.revisedConfidence,
+        reasoning: `${finding.reasoning}\nAI validation: ${decision.reasons.join("; ")}`
+      }];
+    });
+    log(`ai-audit: validation round ${round} kept=${filtered.length}/${findings.length}`);
+    jobRecorder?.succeed(jobId, { valid: true, kept: filtered.length, rejected: findings.length - filtered.length });
+    return filtered;
+  } catch (error) {
+    log(`ai-audit: validation round ${round} failed: ${error instanceof Error ? error.message : String(error)}`);
+    jobRecorder?.fail(jobId, error);
+    return findings;
+  }
+}
+
+function parseSourceMapResponse(text: string): ParseResult<AuditSourceMap> {
+  const raw = normalizeSourceMapJson(safeJsonParse(text));
+  const checked = auditSourceMapSchema.safeParse(raw);
+  if (checked.success && hasSourceMapResponseShape(raw)) return { ok: true, data: checked.data };
+  const salvaged = salvageSourceMapResponse(raw);
+  if (salvaged && hasSourceMapResponseShape(raw)) return { ok: true, data: salvaged };
+  return { ok: false, issues: checked.success ? [{ path: [], message: "Response did not include source-map keys" }] : toValidationIssues(checked.error.issues) };
+}
+
+function parseAuditResponse(text: string): ParseResult<z.infer<typeof auditResponseSchema>> {
+  const raw = safeJsonParse(text);
+  const normalized = normalizeAuditResponseJson(raw);
+  const checked = auditResponseSchema.safeParse(normalized);
+  if (checked.success && hasAuditResponseShape(normalized)) return { ok: true, data: checked.data };
+  const salvaged = salvageAuditResponse(normalized);
+  if (salvaged && hasAuditResponseShape(normalized)) return { ok: true, data: salvaged };
+  return { ok: false, issues: checked.success ? [{ path: [], message: "Response did not include audit response keys" }] : toValidationIssues(checked.error.issues) };
+}
+
+function parseAuditValidationResponse(text: string, parsedJson?: unknown): ParseResult<z.infer<typeof auditValidationResponseSchema>> {
+  const raw = parsedJson ?? safeJsonParse(text);
+  const checked = auditValidationResponseSchema.safeParse(raw);
+  if (checked.success && isRecord(raw) && Object.prototype.hasOwnProperty.call(raw, "decisions")) return { ok: true, data: checked.data };
+  return { ok: false, issues: checked.success ? [{ path: [], message: "Response did not include validation decisions" }] : toValidationIssues(checked.error.issues) };
+}
+
+function salvageAuditResponse(value: unknown): z.infer<typeof auditResponseSchema> | undefined {
+  if (!isRecord(value)) return undefined;
+  const rawFindings = Array.isArray(value.findings) ? value.findings : [];
+  const findings = rawFindings
+    .map((item) => auditFindingSchema.safeParse(item))
+    .filter((item): item is z.SafeParseSuccess<z.infer<typeof auditFindingSchema>> => item.success)
+    .map((item) => item.data);
+  const requestedFiles = z.array(z.string()).safeParse(value.requestedFiles).success
+    ? z.array(z.string()).parse(value.requestedFiles)
+    : [];
+  const toolCalls = Array.isArray(value.toolCalls)
+    ? value.toolCalls.map((item) => auditToolCallSchema.safeParse(item)).filter((item): item is z.SafeParseSuccess<z.infer<typeof auditToolCallSchema>> => item.success).map((item) => item.data)
+    : [];
+  const hypotheses = Array.isArray(value.hypotheses)
+    ? value.hypotheses.map((item) => auditHypothesisSchema.safeParse(item)).filter((item): item is z.SafeParseSuccess<z.infer<typeof auditHypothesisSchema>> => item.success).map((item) => item.data)
+    : [];
+  const rejectedHypotheses = Array.isArray(value.rejectedHypotheses)
+    ? value.rejectedHypotheses.map((item) => rejectedHypothesisSchema.safeParse(item)).filter((item): item is z.SafeParseSuccess<z.infer<typeof rejectedHypothesisSchema>> => item.success).map((item) => item.data)
+    : [];
+  if (!findings.length && !requestedFiles.length && !toolCalls.length && !hypotheses.length && !rejectedHypotheses.length) return undefined;
+  return {
+    summary: typeof value.summary === "string" ? value.summary : "Partially salvaged malformed AI audit response",
+    requestedFiles,
+    toolCalls,
+    complete: typeof value.complete === "boolean" ? value.complete : false,
+    hypotheses,
+    rejectedHypotheses,
+    findings
+  };
+}
+
+function salvageSourceMapResponse(value: unknown): AuditSourceMap | undefined {
+  if (!isRecord(value)) return undefined;
+  const priorityFilesByClass: Record<string, string[]> = {};
+  if (isRecord(value.priorityFilesByClass)) {
+    for (const [key, paths] of Object.entries(value.priorityFilesByClass)) {
+      const strings = stringArrayFrom(paths);
+      if (strings.length) priorityFilesByClass[key] = strings;
     }
   }
-  return checked.data;
+  const catalog = salvageSourceMapCatalog(value.catalog);
+  const sourceMap: AuditSourceMap = {
+    summary: typeof value.summary === "string" ? value.summary : "",
+    globalPriorityFiles: stringArrayFrom(value.globalPriorityFiles),
+    priorityFilesByClass,
+    notes: stringArrayFrom(value.notes),
+    catalog
+  };
+  const hasCatalog = catalog.sources.length || catalog.sinks.length || catalog.sanitizers.length || catalog.guards.length;
+  if (!sourceMap.summary && !sourceMap.globalPriorityFiles.length && !Object.keys(priorityFilesByClass).length && !sourceMap.notes.length && !hasCatalog) return undefined;
+  return sourceMap;
+}
+
+function salvageSourceMapCatalog(value: unknown): AuditSourceMap["catalog"] {
+  const empty = { sources: [], sinks: [], sanitizers: [], guards: [] };
+  if (!isRecord(value)) return empty;
+  const keep = (items: unknown): AuditSourceMap["catalog"]["sources"] => Array.isArray(items)
+    ? items
+      .map((item) => auditCatalogItemSchema.safeParse(item))
+      .filter((item): item is z.SafeParseSuccess<z.infer<typeof auditCatalogItemSchema>> => item.success)
+      .map((item) => item.data)
+    : [];
+  return {
+    sources: keep(value.sources),
+    sinks: keep(value.sinks),
+    sanitizers: keep(value.sanitizers),
+    guards: keep(value.guards)
+  };
+}
+
+function stringArrayFrom(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
+}
+
+function buildSourceMapRetryPrompt(originalPrompt: string, invalidJson: string, issues: ValidationIssue[]): string {
+  return [
+    "Previous source-map response was invalid. Retry from the original manifest and return a complete JSON object.",
+    "Validation errors:",
+    ...formatValidationIssues(issues),
+    "",
+    "Previous response:",
+    truncateForPrompt(invalidJson || "<empty>", 4_000),
+    "",
+    "Requirements:",
+    "- Return raw JSON only: {summary, globalPriorityFiles, priorityFilesByClass, notes}.",
+    "- Use exact paths from the manifest only.",
+    "- Keep output compact and close all JSON arrays/objects.",
+    "",
+    originalPrompt
+  ].join("\n");
+}
+
+function buildSourceMapRepairPrompt(invalidJson: string, issues: ValidationIssue[]): string {
+  return [
+    "Validation errors:",
+    ...formatValidationIssues(issues),
+    "",
+    "Invalid source-map JSON to repair:",
+    truncateForPrompt(invalidJson, 8_000),
+    "",
+    "Return the corrected raw JSON object only with keys: summary, globalPriorityFiles, priorityFilesByClass, notes."
+  ].join("\n");
+}
+
+function buildAuditRetryPrompt(roundPrompt: string, invalidJson: string, issues: ValidationIssue[]): string {
+  return [
+    "Previous audit response was invalid or empty. Retry the same audit round and return a complete JSON object.",
+    "Validation errors:",
+    ...formatValidationIssues(issues),
+    "",
+    "Previous response:",
+    truncateForPrompt(invalidJson || "<empty>", 4_000),
+    "",
+    "Requirements:",
+    "- Return raw JSON only: {summary, requestedFiles, toolCalls, complete, hypotheses, rejectedHypotheses, findings}.",
+    "- Use enum fields as single strings, never arrays.",
+    "- If there are no findings, still include all required keys with empty arrays.",
+    "",
+    roundPrompt
+  ].join("\n");
+}
+
+function buildAuditRepairPrompt(invalidJson: string, issues: ValidationIssue[]): string {
+  return [
+    "Validation errors:",
+    ...formatValidationIssues(issues),
+    "",
+    "Invalid JSON to repair:",
+    invalidJson,
+    "",
+    "Return the corrected raw JSON object only. Enum fields must be single strings, never arrays."
+  ].join("\n");
+}
+
+function formatValidationIssues(issues: readonly ValidationIssue[]): string[] {
+  return issues.slice(0, 20).map((issue) => `- ${issue.path.join(".") || "<root>"}: ${issue.message}`);
+}
+
+function toValidationIssues(issues: readonly z.ZodIssue[]): ValidationIssue[] {
+  return issues.map((issue) => ({ path: [...issue.path], message: issue.message }));
+}
+
+function normalizeSourceMapJson(value: unknown): unknown {
+  if (isRecord(value)) {
+    if (isRecord(value.sourceMap)) return value.sourceMap;
+    if (isRecord(value.result)) return value.result;
+  }
+  return value;
+}
+
+function hasSourceMapResponseShape(value: unknown): boolean {
+  return isRecord(value) && ["summary", "globalPriorityFiles", "priorityFilesByClass", "notes"].some((key) => Object.prototype.hasOwnProperty.call(value, key));
+}
+
+function hasAuditResponseShape(value: unknown): boolean {
+  return isRecord(value) && ["summary", "requestedFiles", "toolCalls", "complete", "findings"].some((key) => Object.prototype.hasOwnProperty.call(value, key));
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function truncateForPrompt(value: string, maxChars: number): string {
+  if (value.length <= maxChars) return value;
+  return `${value.slice(0, maxChars)}\n...[truncated]`;
 }
 
 function buildAuditSystemPrompt(): string {
@@ -206,10 +915,11 @@ function buildAuditSystemPrompt(): string {
     "Do not report runtime environment references such as process.env.API_KEY, import.meta.env.KEY, os.environ['KEY'], getenv('KEY'), or ENV['KEY'] as hardcoded secrets.",
     "If source, sink, missing control, and exploit preconditions are not all visible in supplied code, request more files or report nothing.",
     "Prefer no finding over a weak finding.",
-    "Use category rubrics: auth requires missing authorization on reachable sensitive action; SSRF requires user-controlled URL reaching outbound request without allowlist; path traversal requires user path reaching filesystem without normalization/base check; command injection requires user input reaching shell command; XSS requires untrusted HTML/script reaching render sink without escaping; template/RCE chains require a plausible pollution/input vector plus vulnerable render/eval behavior; secrets require literal committed secret value, not runtime env reference; crypto requires weak primitive or unsafe key/IV usage; CSRF/CORS requires browser-reachable state change or credential exposure.",
-    "Focus on auth/authz, tenant isolation, injection, XSS, SSRF, path traversal, file upload, crypto misuse, webhooks, CORS/CSRF/session bugs, secrets, unsafe redirects, unsafe dynamic execution.",
+    "Use category rubrics: auth requires missing authentication on a reachable sensitive action; authz/business-logic requires an actor to access or mutate another actor's object, privileged function, workflow, payment, coupon, order, review, basket, or admin state without server-side policy enforcement; SSRF requires user-controlled URL reaching outbound request without allowlist; path traversal requires user path reaching filesystem without normalization/base check; open redirect requires attacker-controlled redirect destination without a strict allowlist; file upload requires unsafe extension/content validation, archive extraction, or server-side write controls; XXE requires XML parsing with entity expansion or external entities enabled on user-controlled XML; command injection requires user input reaching shell command; XSS requires untrusted HTML/script reaching render sink without escaping; template/RCE chains require a plausible pollution/input vector plus vulnerable render/eval behavior; secrets require literal committed secret value, not runtime env reference; crypto requires weak primitive or unsafe key/IV usage; dependency requires vulnerable or integrity-sensitive package usage that is reachable or loaded by app code; CSRF/CORS/session requires browser-reachable state change, credential exposure, or cookie/session weakening.",
+    "Focus on auth/authz, business logic, tenant isolation, injection, XSS, SSRF, path traversal, file upload, XXE, vulnerable dependency reachability, crypto misuse, webhooks, CORS/CSRF/session bugs, secrets, unsafe redirects, unsafe dynamic execution, debug/metrics/log exposure, and sensitive data exposure.",
     "Return raw JSON object only: {summary, requestedFiles, toolCalls, complete, findings}. No prose, markdown, code fences, comments, or extra keys.",
     "Use only enum values listed in the schema. Do not invent categories, severities, confidences, statuses, tool types, or field names.",
+    "Enum fields are single strings, never arrays: category=\"security\", severity=\"high\", confidence=\"high\", status=\"suspected\".",
     "findings must include title, category, severity, confidence, status, path, startLine, endLine, source, sourceLine, sink, sinkLine, dataFlow, missingControl, exploitPreconditions, safeRepro, evidence, reasoning, remediation."
   ].join("\n");
 }
@@ -227,11 +937,17 @@ Do not return findings until source file contents are supplied.
 Repository AI instructions:
 ${options.aiInstructions || "None supplied."}
 
+Negative evidence memory:
+${formatNegativeEvidenceForPrompt(options.negativeEvidence)}
+
+AI source map:
+${formatSourceMapForPrompt(options.sourceMap)}
+
 Manifest:
 ${formatManifestForPrompt(manifest, manifestCharBudget)}`;
 }
 
-function buildAuditRoundPrompt(pack: unknown, memory: AuditMemory): string {
+function buildAuditRoundPrompt(pack: unknown, memory: AuditMemory, allowedCategories: readonly string[] = categoryValues): string {
   return `Audit these source files for vulnerabilities not necessarily reported by scanners.
 
 Already inspected files:
@@ -247,20 +963,36 @@ Return raw JSON only. No prose, markdown fences, comments, or extra keys. Use on
 {
   "summary": "short summary",
   "requestedFiles": ["exact/path.ts"],
-  "toolCalls": [
+	  "toolCalls": [
     {"type":"read_file","path":"exact/path.ts","query":"","symbol":"","category":"","startLine":1,"endLine":120,"reason":"need callee line range"},
     {"type":"search_text","path":"","query":"dangerousFunction","symbol":"","category":"","startLine":null,"endLine":null,"reason":"find callers"},
     {"type":"search_symbol","path":"","query":"","symbol":"handlerName","category":"","startLine":null,"endLine":null,"reason":"find definition"},
     {"type":"find_category","path":"","query":"","symbol":"","category":"ssrf","startLine":null,"endLine":null,"reason":"find outbound sinks"}
-  ],
-  "complete": false,
-  "findings": [
+	  ],
+	  "complete": false,
+	  "hypotheses": [
+	    {
+	      "id": "authz-1",
+	      "vulnerabilityClass": "authz",
+	      "title": "candidate vulnerability title",
+	      "path": "exact/path.ts",
+	      "source": "input or actor",
+	      "sink": "side effect or dangerous operation",
+	      "evidence": [{"path":"exact/path.ts","line":1,"note":"candidate evidence"}],
+	      "status": "candidate",
+	      "reason": "why this needs validation before reporting"
+	    }
+	  ],
+	  "rejectedHypotheses": [
+	    {"id":"safe-1","title":"candidate rejected", "path":"exact/path.ts", "reason":"guard, sanitizer, unreachable, or test-only context disproves it"}
+	  ],
+	  "findings": [
     {
       "title": "finding title",
-      "category": ${JSON.stringify(categoryValues)},
-      "severity": ${JSON.stringify(severityValues)},
-      "confidence": ${JSON.stringify(confidenceValues)},
-      "status": ${JSON.stringify(statusValues)},
+      "category": "security",
+      "severity": "high",
+      "confidence": "high",
+      "status": "suspected",
       "path": "exact/path.ts",
       "startLine": 1,
       "endLine": 1,
@@ -277,7 +1009,15 @@ Return raw JSON only. No prose, markdown fences, comments, or extra keys. Use on
       "remediation": "specific fix"
     }
   ]
-}`;
+}
+
+Allowed enum values:
+- category: ${JSON.stringify(allowedCategories)}
+- severity: ${JSON.stringify(severityValues)}
+- confidence: ${JSON.stringify(confidenceValues)}
+- status: ${JSON.stringify(statusValues)}
+
+Enum fields must be single strings, never arrays. Do not output category=["xss"] or severity=["high"].`;
 }
 
 function auditRequestCharBudget(options: AiExploratoryAuditOptions): number {
@@ -300,6 +1040,23 @@ function formatManifestForPrompt(manifest: unknown, charBudget: number): string 
     files.push(compactManifestEntry(entry));
   }
   return JSON.stringify({ files, omittedFiles: Math.max(0, entries.length - files.length) }, null, 2);
+}
+
+function formatSourceMapForPrompt(sourceMap: AuditSourceMap | undefined): string {
+  if (!sourceMap || (!sourceMap.summary && !sourceMap.notes.length && !sourceMap.globalPriorityFiles.length && !Object.keys(sourceMap.priorityFilesByClass).length && !sourceMapCatalogCount(sourceMap))) {
+    return "None supplied.";
+  }
+  return JSON.stringify({
+    summary: sourceMap.summary,
+    globalPriorityFiles: sourceMap.globalPriorityFiles,
+    priorityFilesByClass: sourceMap.priorityFilesByClass,
+    notes: sourceMap.notes,
+    catalog: sourceMap.catalog
+  }, null, 2);
+}
+
+function sourceMapCatalogCount(sourceMap: AuditSourceMap): number {
+  return sourceMap.catalog.sources.length + sourceMap.catalog.sinks.length + sourceMap.catalog.sanitizers.length + sourceMap.catalog.guards.length;
 }
 
 function compactManifestEntry(entry: ManifestEntry, minimal = false) {
@@ -439,7 +1196,7 @@ function buildAuditChunks(files: IndexedFile[], windowLines = AUDIT_CHUNK_LINES)
   return chunks;
 }
 
-function createAuditTraversal(files: IndexedFile[], scannerResults: ScannerResult[], importGraph: Map<string, string[]>, chunks: Map<string, AuditTarget[]>) {
+function createAuditTraversal(files: IndexedFile[], scannerResults: ScannerResult[], importGraph: Map<string, string[]>, chunks: Map<string, AuditTarget[]>, priorityFiles: string[] = []) {
   const fallback = heuristicEntryFiles(files, scannerResults);
   const byPath = new Map(files.map((file) => [file.path, file]));
   const allowed = new Set(files.map((file) => file.path));
@@ -465,6 +1222,7 @@ function createAuditTraversal(files: IndexedFile[], scannerResults: ScannerResul
       if (first) pushTargets([first]);
     }
   };
+  pushFirstChunks(priorityFiles.map(normalizePath));
   pushFirstChunks(fallback.filter((filePath) => isEntryPointFile(byPath.get(filePath)!)));
   if (!queue.length) pushFirstChunks(fallback.slice(0, 6));
 
@@ -726,11 +1484,11 @@ function offsetInventory(inventory: SecurityInventory, offset: number): Security
 }
 
 function scoreManifestFile(file: ManifestEntry): number {
-  return attackSurfaceWeight(file.path) + file.priorityHints.length * 10 + file.routes.length * 6 + (file.hasScannerResult ? 8 : 0);
+  return attackSurfaceWeight(file.path) + fileRoleScore(classifyFileRole(file.path, file.language)) + file.priorityHints.length * 10 + file.routes.length * 6 + (file.hasScannerResult ? 8 : 0);
 }
 
 function scoreFile(file: IndexedFile, scannerPaths: Set<string>): number {
-  return attackSurfaceWeight(file.path) + priorityHints(file).length * 10 + detectRoutes(file.path, file.content).length * 6 + (scannerPaths.has(file.path) ? 8 : 0) - Math.min(file.lineCount / 500, 5);
+  return attackSurfaceWeight(file.path) + fileRoleScore(classifyFileRole(file.path, file.language)) + priorityHints(file).length * 10 + detectRoutes(file.path, file.content).length * 6 + (scannerPaths.has(file.path) ? 8 : 0) - Math.min(file.lineCount / 500, 5);
 }
 
 function attackSurfaceWeight(filePath: string): number {
@@ -753,17 +1511,9 @@ function priorityHints(file: IndexedFile): string[] {
 function isAuditableFile(file: IndexedFile): boolean {
   if (file.lineCount === 0) return false;
   if (file.language === "binary" || file.language === "unknown") return false;
+  if (isReusableOrGeneratedRole(classifyFileRole(file.path, file.language))) return false;
   if (/(package-lock\.json|yarn\.lock|pnpm-lock\.yaml|dist\/|build\/|coverage\/)/i.test(file.path)) return false;
   return file.content.length <= 250_000;
-}
-
-function normalizeAuditResponse(parsed: unknown): unknown {
-  if (parsed && typeof parsed === "object") {
-    const object = parsed as Record<string, unknown>;
-    if (object.audit && typeof object.audit === "object") return object.audit;
-    if (object.result && typeof object.result === "object") return object.result;
-  }
-  return parsed;
 }
 
 function isSupportedAuditFinding(input: z.infer<typeof auditFindingSchema>, allowed: Map<string, IndexedFile>, memory: AuditMemory): boolean {
@@ -779,8 +1529,39 @@ function isSupportedAuditFinding(input: z.infer<typeof auditFindingSchema>, allo
   }
   const text = JSON.stringify(input).toLowerCase();
   if (input.category.toLowerCase() === "secrets" && /(process\.env|import\.meta\.env|os\.environ|getenv\(|env\[)/i.test(text) && !/(hardcoded|literal|committed|checked in|\.env)/i.test(text)) return false;
+  if (input.category.toLowerCase() === "xss" && isServerTemplatePath(input.path) && !hasTemplateRenderReachability(input, allowed)) return false;
   if (/(^|\/)(__tests__|test|tests|spec|fixtures|examples?)\//i.test(input.path) && !/prod|production|runtime|reachable/i.test(text)) return false;
   return lineEvidenceMatches(input, allowed);
+}
+
+function isServerTemplatePath(filePath: string): boolean {
+  return /\.(ejs|pug|jade|hbs|handlebars|erb|twig|njk|liquid)$/i.test(filePath)
+    || /(^|\/)(views|templates)\//i.test(filePath);
+}
+
+function hasTemplateRenderReachability(input: z.infer<typeof auditFindingSchema>, allowed: Map<string, IndexedFile>): boolean {
+  const names = templateReferenceNames(input.path);
+  for (const file of allowed.values()) {
+    if (file.path === input.path) continue;
+    if (!/\.(js|jsx|mjs|cjs|ts|tsx|py|php|rb|java|cs)$/i.test(file.path)) continue;
+    if (!/(render|template|view)/i.test(file.content)) continue;
+    const lines = file.content.split(/\r?\n/);
+    for (const [index, line] of lines.entries()) {
+      if (!/(render|template|view)/i.test(line)) continue;
+      if (!names.some((name) => line.includes(name))) continue;
+      const nearby = lines.slice(Math.max(0, index - 5), Math.min(lines.length, index + 6)).join("\n");
+      if (detectRoutes(file.path, nearby).length || /(req|request|res\.render|reply\.view|render_template|erb\s*:|haml\s*:)/i.test(nearby)) return true;
+    }
+  }
+  return false;
+}
+
+function templateReferenceNames(filePath: string): string[] {
+  const normalized = filePath.replaceAll("\\", "/");
+  const withoutExt = normalized.replace(/\.[^.]+$/, "");
+  const basename = path.posix.basename(withoutExt);
+  const viewsRelative = withoutExt.match(/(?:^|\/)(?:views|templates)\/(.+)$/i)?.[1];
+  return [...new Set([basename, viewsRelative, withoutExt].filter((item): item is string => Boolean(item)))];
 }
 
 function lineEvidenceMatches(input: z.infer<typeof auditFindingSchema>, allowed: Map<string, IndexedFile>): boolean {
@@ -834,4 +1615,14 @@ function dedupeFindings(findings: Finding[]): Finding[] {
     seen.add(key);
     return true;
   });
+}
+
+function unique<T>(values: T[]): T[] {
+  return [...new Set(values)];
+}
+
+async function sequence<T, R>(items: T[], fn: (item: T) => Promise<R>): Promise<R[]> {
+  const output: R[] = [];
+  for (const item of items) output.push(await fn(item));
+  return output;
 }

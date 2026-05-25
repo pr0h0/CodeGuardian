@@ -32,8 +32,11 @@ describe("ai schema", () => {
 
     expect(system).toContain("Return raw JSON object only");
     expect(system).toContain("Use only enum values explicitly listed");
+    expect(system).toContain("Enum fields are single strings");
     expect(critic).toContain("No prose, markdown, code fences, comments, or extra keys");
     expect(user).toContain(JSON.stringify(categoryValues));
+    expect(user).toContain("\"category\": \"security\"");
+    expect(user).not.toContain("\"category\": [\"security\"");
     expect(aiFindingJsonSchema.schema).toMatchObject({
       type: "object",
       additionalProperties: false

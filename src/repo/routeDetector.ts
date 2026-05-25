@@ -12,7 +12,8 @@ export interface RouteInfo {
 export function detectRoutes(filePath: string, content: string): RouteInfo[] {
   const routes: RouteInfo[] = [];
   const regexes = [
-    { framework: "express", regex: /\b(?:app|router)\.(get|post|put|patch|delete|head|options)\s*\(\s*['"`]([^'"`]+)['"`]/gi },
+    { framework: "express", regex: /\b(?:app|router)\.(get|post|put|patch|delete|head|options|all|use)\s*\(\s*['"`]([^'"`]+)['"`]/gi },
+    { framework: "custom-router", regex: /\b(?:this\.)?addRoute\s*\(\s*['"`](get|post|put|patch|delete|head|options|all|use)['"`]\s*,\s*['"`]([^'"`]+)['"`]/gi },
     { framework: "fastapi", regex: /@app\.(get|post|put|patch|delete)\s*\(\s*['"]([^'"]+)['"]/gi },
     { framework: "flask", regex: /@app\.route\s*\(\s*['"]([^'"]+)['"][^)]*methods\s*=\s*\[?['"]?([A-Z]+)/gi },
     { framework: "spring", regex: /@(Get|Post|Put|Patch|Delete)Mapping\s*\(\s*['"]([^'"]+)['"]/g },

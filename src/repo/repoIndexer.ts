@@ -1,10 +1,7 @@
 import fs from "node:fs";
-import path from "node:path";
 import { detectLanguage } from "./languageDetect.js";
 import { walkRepo } from "./fileWalker.js";
-import { extractSymbols } from "./symbolExtractor.js";
-import { detectRoutes } from "./routeDetector.js";
-import { extractImports } from "./importGraph.js";
+import { analyzeCode } from "./codeIntelligence.js";
 import { insertChunk, insertEdge, insertFile, insertRoute, insertSymbol } from "../db/repositories.js";
 import type { Db } from "../db/database.js";
 import { sha256 } from "../utils/hashing.js";
@@ -60,10 +57,11 @@ export function indexRepository(db: Db, scanId: string, repoPath: string, option
     const content = buffer.toString("utf8");
     const language = detectLanguage(rel, content.split(/\r?\n/, 1)[0] ?? "");
     const fileId = insertFile(db, { scanId, path: rel, language, sizeBytes: stat.size, sha256: sha256(content), lineCount: lineCount(content), indexed: true });
+    const analysis = analyzeCode(rel, content);
     for (const chunk of buildChunks(content)) insertChunk(db, scanId, fileId, rel, chunk.startLine, chunk.endLine, chunk.content, sha256(chunk.content));
-    for (const symbol of extractSymbols(content)) insertSymbol(db, { scanId, fileId, path: rel, name: symbol.name, kind: symbol.kind, startLine: symbol.startLine, endLine: symbol.endLine, signature: symbol.signature, exported: symbol.exported ? 1 : 0, metadataJson: "{}" });
-    for (const route of detectRoutes(path.join("/", rel), content)) insertRoute(db, { scanId, fileId, method: route.method, routePath: route.routePath, handlerName: route.handlerName ?? null, startLine: route.startLine, endLine: route.endLine, frameworkGuess: route.frameworkGuess, metadataJson: "{}" });
-    for (const imported of extractImports(content)) insertEdge(db, { scanId, fromType: "file", fromId: fileId, toType: "module", toId: null, edgeType: "imports", metadataJson: JSON.stringify({ path: rel, imported }) });
+    for (const symbol of analysis.symbols) insertSymbol(db, { scanId, fileId, path: rel, name: symbol.name, kind: symbol.kind, startLine: symbol.startLine, endLine: symbol.endLine, signature: symbol.signature, exported: symbol.exported ? 1 : 0, metadataJson: "{}" });
+    for (const route of analysis.routes) insertRoute(db, { scanId, fileId, method: route.method, routePath: route.routePath, handlerName: route.handlerName ?? null, startLine: route.startLine, endLine: route.endLine, frameworkGuess: route.frameworkGuess, metadataJson: "{}" });
+    for (const imported of analysis.imports) insertEdge(db, { scanId, fromType: "file", fromId: fileId, toType: "module", toId: null, edgeType: "imports", metadataJson: JSON.stringify({ path: rel, imported }) });
     indexed.push({ path: rel, absolutePath, language, content, lineCount: lineCount(content) });
   }
   return indexed;

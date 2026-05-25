@@ -81,6 +81,18 @@ describe("custom rules", () => {
     expect(results.filter((result) => result.ruleId === "generic-secret-assignment")).toHaveLength(3);
   });
 
+  it("preserves safe secret classification context in redacted messages", () => {
+    const results = runCustomRules([
+      file("backend/app.js", "javascript", "session({ secret: \"0Ha1Hu2Ofo3Ono4Tamo5Vamo6Gore7Dolje8Naprijed9Nazad0\" });")
+    ]);
+
+    const secret = results.find((result) => result.ruleId === "generic-secret-assignment");
+    expect(secret?.message).toContain("secret classification:");
+    expect(secret?.message).toContain("real-looking");
+    expect(secret?.message).toContain("[REDACTED]");
+    expect(secret?.message).not.toContain("0Ha1Hu2Ofo3Ono4Tamo5Vamo6Gore7Dolje8Naprijed9Nazad0");
+  });
+
   it("keeps bundled rule regexes valid", () => {
     for (const rule of loadCustomRules()) {
       expect(() => new RegExp(rule.regex, "gim")).not.toThrow();

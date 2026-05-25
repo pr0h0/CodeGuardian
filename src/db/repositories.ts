@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import type { Db } from "./database.js";
 import type { Finding, ScannerResult } from "../scanners/types.js";
+import type { EdgeInsertRow, FileRow, RouteInsertRow, ScanBundle, ScannerRunInsertRow, SymbolInsertRow } from "./rows.js";
 
 export interface FileRecord {
   id?: number;
@@ -36,32 +37,32 @@ export function insertChunk(db: Db, scanId: string, fileId: number, path: string
     .run(scanId, fileId, path, start, end, content, sha, summary);
 }
 
-export function insertSymbol(db: Db, row: Record<string, unknown>): void {
+export function insertSymbol(db: Db, row: SymbolInsertRow): void {
   db.prepare(`INSERT INTO symbols (scan_id,file_id,path,name,kind,start_line,end_line,signature,exported,metadata_json)
     VALUES (@scanId,@fileId,@path,@name,@kind,@startLine,@endLine,@signature,@exported,@metadataJson)`).run(row);
 }
 
-export function insertRoute(db: Db, row: Record<string, unknown>): void {
+export function insertRoute(db: Db, row: RouteInsertRow): void {
   db.prepare(`INSERT INTO routes (scan_id,file_id,method,route_path,handler_name,start_line,end_line,framework_guess,metadata_json)
     VALUES (@scanId,@fileId,@method,@routePath,@handlerName,@startLine,@endLine,@frameworkGuess,@metadataJson)`).run(row);
 }
 
-export function insertEdge(db: Db, row: Record<string, unknown>): void {
+export function insertEdge(db: Db, row: EdgeInsertRow): void {
   db.prepare(`INSERT INTO edges (scan_id,from_type,from_id,to_type,to_id,edge_type,metadata_json)
     VALUES (@scanId,@fromType,@fromId,@toType,@toId,@edgeType,@metadataJson)`).run(row);
 }
 
 export function insertScannerResult(db: Db, scanId: string, result: ScannerResult): void {
   db.prepare(`INSERT INTO scanner_results (scan_id,scanner,rule_id,title,severity,path,start_line,end_line,message,raw_json,fingerprint)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?)`).run(scanId, result.scanner, result.ruleId, result.title, result.severity, result.path ?? null, result.startLine ?? null, result.endLine ?? null, result.message, JSON.stringify(result.raw ?? {}), (result as any).fingerprint ?? null);
+    VALUES (?,?,?,?,?,?,?,?,?,?,?)`).run(scanId, result.scanner, result.ruleId, result.title, result.severity, result.path ?? null, result.startLine ?? null, result.endLine ?? null, result.message, JSON.stringify(result.raw ?? {}), result.fingerprint ?? null);
 }
 
 export function insertFinding(db: Db, scanId: string, finding: Finding): void {
   db.prepare(`INSERT INTO findings (scan_id,title,category,severity,confidence,status,path,start_line,end_line,source,sink,evidence_json,reasoning,remediation,raw_json,fingerprint,baseline_status,exploitability_score)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(scanId, finding.title, finding.category, finding.severity, finding.confidence, finding.status, finding.path ?? null, finding.startLine ?? null, finding.endLine ?? null, finding.source ?? null, finding.sink ?? null, JSON.stringify(finding.evidence), finding.reasoning, finding.remediation, JSON.stringify(finding.raw ?? {}), (finding as any).fingerprint ?? null, (finding as any).baselineStatus ?? null, (finding as any).exploitabilityScore ?? null);
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(scanId, finding.title, finding.category, finding.severity, finding.confidence, finding.status, finding.path ?? null, finding.startLine ?? null, finding.endLine ?? null, finding.source ?? null, finding.sink ?? null, JSON.stringify(finding.evidence), finding.reasoning, finding.remediation, JSON.stringify(finding.raw ?? {}), finding.fingerprint ?? null, finding.baselineStatus ?? null, finding.exploitabilityScore ?? null);
 }
 
-export function insertScannerRun(db: Db, row: Record<string, unknown>): void {
+export function insertScannerRun(db: Db, row: ScannerRunInsertRow): void {
   db.prepare(`INSERT INTO scanner_runs (scan_id,scanner,image,command,started_at,elapsed_ms,exit_code,result_count,warning,metadata_json)
     VALUES (@scanId,@scanner,@image,@command,@startedAt,@elapsedMs,@exitCode,@resultCount,@warning,@metadataJson)`).run(row);
 }
@@ -73,13 +74,17 @@ export function upsertScanCache(db: Db, repoPath: string, file: { path: string; 
     .run(repoPath, file.path, file.sha256, file.language, file.lineCount, new Date().toISOString());
 }
 
-export function getScanBundle(db: Db, scanId: string) {
+export function getScanFiles(db: Db, scanId: string): FileRow[] {
+  return db.prepare("SELECT * FROM files WHERE scan_id = ?").all(scanId) as FileRow[];
+}
+
+export function getScanBundle(db: Db, scanId: string): ScanBundle {
   return {
-    scan: db.prepare("SELECT * FROM scans WHERE id = ?").get(scanId),
-    files: db.prepare("SELECT * FROM files WHERE scan_id = ?").all(scanId),
-    scannerResults: db.prepare("SELECT * FROM scanner_results WHERE scan_id = ?").all(scanId),
-    scannerRuns: db.prepare("SELECT * FROM scanner_runs WHERE scan_id = ?").all(scanId),
-    findings: db.prepare("SELECT * FROM findings WHERE scan_id = ?").all(scanId),
-    approvals: db.prepare("SELECT * FROM approvals WHERE scan_id = ? OR scan_id IS NULL").all(scanId)
+    scan: db.prepare("SELECT * FROM scans WHERE id = ?").get(scanId) as ScanBundle["scan"],
+    files: getScanFiles(db, scanId),
+    scannerResults: db.prepare("SELECT * FROM scanner_results WHERE scan_id = ?").all(scanId) as ScanBundle["scannerResults"],
+    scannerRuns: db.prepare("SELECT * FROM scanner_runs WHERE scan_id = ?").all(scanId) as ScanBundle["scannerRuns"],
+    findings: db.prepare("SELECT * FROM findings WHERE scan_id = ?").all(scanId) as ScanBundle["findings"],
+    approvals: db.prepare("SELECT * FROM approvals WHERE scan_id = ? OR scan_id IS NULL").all(scanId) as ScanBundle["approvals"]
   };
 }

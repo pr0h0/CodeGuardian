@@ -118,6 +118,78 @@ describe("report", () => {
     expect(content).toContain("<summary><strong>1. high Command injection @app.ts:1</strong></summary>");
   });
 
+  it("applies report filters to the main findings view", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cg-"));
+    const file = writeMarkdownReport(dir, {
+      scan: { id: "1", repo_path: ".", status: "completed" },
+      files: [],
+      findings: [
+        {
+          title: "Low confidence XSS",
+          category: "xss",
+          severity: "medium",
+          confidence: "low",
+          status: "suspected",
+          path: "app.ts",
+          start_line: 1,
+          reasoning: "weak evidence",
+          remediation: "validate output encoding",
+          evidence_json: "[]"
+        },
+        {
+          title: "Confirmed SSRF",
+          category: "ssrf",
+          severity: "high",
+          confidence: "high",
+          status: "confirmed_true_positive",
+          path: "fetch.ts",
+          start_line: 2,
+          reasoning: "request URL reaches fetch",
+          remediation: "allowlist hosts",
+          evidence_json: "[]"
+        }
+      ],
+      scannerResults: [],
+      projectConfig: {
+        reportFilters: {
+          minSeverity: "medium",
+          minConfidence: "medium",
+          guidance: "Drop weak browser-header findings."
+        }
+      }
+    });
+
+    const content = fs.readFileSync(file, "utf8");
+    expect(content).toContain("Confirmed SSRF");
+    expect(content).not.toContain("Low confidence XSS");
+    expect(content).toContain("- Report-filtered findings: 1");
+    expect(content).toContain("- Report guidance: Drop weak browser-header findings.");
+  });
+
+  it("renders scan strategy metadata", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cg-"));
+    const file = writeMarkdownReport(dir, {
+      scan: { id: "1", repo_path: ".", status: "completed" },
+      files: [],
+      findings: [],
+      scannerResults: [],
+      scanStrategy: {
+        focusPaths: ["src/routes/**"],
+        avoidPaths: ["tests/**"],
+        vulnerabilityClasses: ["injection", "ssrf"],
+        rulesOfEngagement: "No destructive requests.",
+        reportFilters: { minSeverity: "high", minConfidence: "medium" }
+      }
+    });
+
+    const content = fs.readFileSync(file, "utf8");
+    expect(content).toContain("Scan Strategy");
+    expect(content).toContain("- Focus paths: src/routes/**");
+    expect(content).toContain("- Avoid paths: tests/**");
+    expect(content).toContain("- Vulnerability classes: injection, ssrf");
+    expect(content).toContain("- Rules of engagement: configured");
+  });
+
   it("exports semgrep-style rules for true positives", () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cg-"));
     const file = writeRuleExport(dir, {

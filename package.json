@@ -23,12 +23,12 @@
     "minimatch": "^10.0.1",
     "openai": "^5.8.2",
     "puppeteer": "^24.11.2",
+    "typescript": "^5.8.3",
     "zod": "^3.25.67"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^22.13.14",
-    "typescript": "^5.8.3",
     "vitest": "^3.2.4"
   }
 }
