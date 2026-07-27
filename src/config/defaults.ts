@@ -5,6 +5,8 @@ export const DEFAULT_IGNORES = [
   "dist",
   "build",
   "coverage",
+  "codeguardian-report",
+  ".codeguardian",
   ".next",
   ".nuxt",
   "target",

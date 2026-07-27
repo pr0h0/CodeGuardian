@@ -30,6 +30,8 @@ export function writeHtmlReport(outDir: string, bundle: any, warnings: string[] 
     scanner,
     files: bundle.files ?? [],
     aiUsage: bundle.aiUsage ?? [],
+    staticRecon: bundle.staticRecon,
+    staticProofPacks: bundle.staticProofPacks ?? [],
     warnings,
     healthScore,
     groupedBySeverity
@@ -64,6 +66,8 @@ function renderDocument(input: {
   scanner: Row[];
   files: Row[];
   aiUsage: Row[];
+  staticRecon?: Row;
+  staticProofPacks: Row[];
   warnings: string[];
   healthScore: number;
   groupedBySeverity: Record<string, number>;
@@ -213,6 +217,8 @@ function renderDocument(input: {
 
     <!-- Sections -->
     ${section("Fix First", renderFixFirst(input.activeFindings), true)}
+    ${section("Static Proof Packs", renderStaticProofPacks(input.staticProofPacks), true)}
+    ${section("Static Recon", renderStaticRecon(input.staticRecon), false)}
     ${section("Attack Chains", renderAttackChainTable(input.attackChains), criticalHigh > 0)}
     ${section("Code Findings", `<div id="findings-container">${renderFindings(input.repoPath, input.activeFindings)}</div>`, true)}
     ${section("Additional SAST Findings", renderAdditionalSastTable(input.additionalSast), false)}
@@ -358,6 +364,46 @@ function renderAdditionalSastTable(rows: Row[]): string {
   ])).join("")}</tbody></table>`;
 }
 
+function renderStaticProofPacks(packs: Row[]): string {
+  if (!packs.length) return "<p>No static proof packs generated.</p>";
+  return packs.slice(0, 25).map((pack, index) => `<article class="card" data-row data-severity="${escAttr(pack.severity)}" data-status="${escAttr(pack.status)}">
+    <h3 style="margin:0 0 6px;font-size:14px;font-weight:600">${index + 1}. <span class="${escAttr(pack.severity)}">${esc(pack.severity)}</span> ${esc(pack.title)}</h3>
+    <div class="meta" style="margin-bottom:8px">
+      <span class="badge ${escAttr(pack.status)}">${esc(pack.status)}</span>
+      <span>${esc(pack.category)}</span>
+      <span>${esc(pack.location)}</span>
+      <span>SAST/static only</span>
+    </div>
+    <p style="margin:0 0 6px;font-size:13px"><strong>Missing control:</strong> ${esc(pack.missingControl)}</p>
+    <p style="margin:0 0 6px;font-size:13px"><strong>Source:</strong> ${esc(pack.source)}</p>
+    <p style="margin:0 0 6px;font-size:13px"><strong>Sink/control:</strong> ${esc(pack.sink)}</p>
+    <details><summary style="font-size:12px;padding:6px 0;border:none;color:var(--accent)">Evidence and regression guidance</summary>
+      ${htmlList("Evidence", pack.evidence)}
+      ${htmlList("Static preconditions", pack.exploitPreconditions)}
+      ${htmlList("Safe regression guidance", pack.safeRegressionGuidance)}
+      ${htmlList("Confidence blockers", pack.confidenceBlockers)}
+    </details>
+  </article>`).join("");
+}
+
+function renderStaticRecon(recon?: Row): string {
+  if (!recon) return "<p>Static recon artifact was not generated.</p>";
+  const endpoints = Array.isArray(recon.endpoints) ? recon.endpoints : [];
+  const guards = Array.isArray(recon.guards) ? recon.guards : [];
+  const inputVectors = Array.isArray(recon.inputVectors) ? recon.inputVectors : [];
+  const sinks = Array.isArray(recon.sinks) ? recon.sinks : [];
+  return [
+    `<p>${esc(recon.summary ?? "No summary recorded.")}</p>`,
+    smallTable(["Method", "Route", "Object IDs", "Location"], endpoints.slice(0, 30).map((item: Row) => [item.method, item.routePath, (item.objectIdParameters ?? []).join(", "), `${item.path}:${item.line ?? "?"}`])),
+    "<h3>Guard Hints</h3>",
+    smallTable(["Kind", "Location", "Detail"], guards.slice(0, 20).map((item: Row) => [item.kind, `${item.path}:${item.line ?? "?"}`, item.detail])),
+    "<h3>Input Vectors</h3>",
+    smallTable(["Kind", "Location", "Detail"], inputVectors.slice(0, 20).map((item: Row) => [item.kind, `${item.path}:${item.line ?? "?"}`, item.detail])),
+    "<h3>Sink / Control Candidates</h3>",
+    smallTable(["Kind", "Location", "Detail"], sinks.slice(0, 20).map((item: Row) => [item.kind, `${item.path}:${item.line ?? "?"}`, item.detail]))
+  ].join("");
+}
+
 function renderDependencyTable(rows: Row[]): string {
   if (!rows.length) return "<p>No dependency findings.</p>";
   return `<table><thead><tr><th>Severity</th><th>Package</th><th>Rule/CVE</th><th>Reason</th><th>File</th></tr></thead><tbody>${rows.map((item) => row(item, [
@@ -413,6 +459,16 @@ function renderScannerCounts(rows: Row[]): string {
 function renderAiUsageTable(rows: Row[]): string {
   if (!rows.length) return "<p>Token usage was not reported by the provider.</p>";
   return `<table><thead><tr><th>Tier</th><th>Provider</th><th>Model</th><th>Requests</th><th>Input tokens</th><th>Cached input tokens</th><th>Output tokens</th><th>Total tokens</th><th>Input cost USD</th><th>Cached input cost USD</th><th>Output cost USD</th><th>Total cost USD</th></tr></thead><tbody>${rows.map((item) => `<tr data-row><td>${esc(item.tier)}</td><td>${esc(item.provider)}</td><td>${esc(item.model)}</td><td>${esc(formatInteger(item.requests))}</td><td>${esc(formatInteger(item.inputTokens))}</td><td>${esc(formatInteger(item.cachedInputTokens))}</td><td>${esc(formatInteger(item.outputTokens))}</td><td>${esc(formatInteger(item.totalTokens))}</td><td>${esc(formatCost(item.inputCostUsd))}</td><td>${esc(formatCost(item.cachedInputCostUsd))}</td><td>${esc(formatCost(item.outputCostUsd))}</td><td>${esc(formatCost(item.costUsd))}</td></tr>`).join("")}</tbody></table>`;
+}
+
+function htmlList(title: string, values: unknown): string {
+  const rows = Array.isArray(values) ? values.slice(0, 8) : [];
+  return `<p style="margin:8px 0 4px"><strong>${esc(title)}</strong></p>${rows.length ? `<ul>${rows.map((item) => `<li>${esc(item)}</li>`).join("")}</ul>` : "<p>None recorded.</p>"}`;
+}
+
+function smallTable(headers: string[], rows: unknown[][]): string {
+  if (!rows.length) return "<p>None recorded.</p>";
+  return `<table><thead><tr>${headers.map((header) => `<th>${esc(header)}</th>`).join("")}</tr></thead><tbody>${rows.map((cells) => `<tr>${cells.map((cell) => `<td>${esc(cell)}</td>`).join("")}</tr>`).join("")}</tbody></table>`;
 }
 
 function formatInteger(value: unknown): string {

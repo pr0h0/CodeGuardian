@@ -31,6 +31,8 @@ export interface CliOptions {
   incremental?: boolean;
   ci?: boolean;
   diff?: string | boolean;
+  workspace?: string;
+  resume?: boolean | string;
 }
 
 export interface RunContext {
@@ -82,7 +84,9 @@ export function createRunContext(repoPath: string, options: CliOptions = {}): Ru
       profile: options.profile ?? projectConfig.profile ?? "all",
       incremental: options.incremental ?? projectConfig.incremental ?? false,
       ci: options.ci ?? false,
-      diff: options.diff ?? undefined
+      diff: options.diff ?? undefined,
+      workspace: options.workspace ?? "",
+      resume: options.resume ?? false
     }
   };
 }

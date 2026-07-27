@@ -46,10 +46,13 @@ export function writeMarkdownReport(outDir: string, bundle: any, warnings: strin
       `- Compliance evidence rows: ${compliance.length}`,
       `- False positives: ${falsePositives.length}`,
       `- Report-filtered findings: ${reportFilterResult.filteredCount}`,
-      `- Suppressed findings: ${bundle.suppressions?.suppressed ?? 0}`
+      `- Suppressed findings: ${bundle.suppressions?.suppressed ?? 0}`,
+      ...(bundle.workspace ? [`- Workspace: ${escapeHtml(bundle.workspace.name)}${bundle.workspace.resume ? " (resumed)" : ""}`] : [])
     ], true),
     ...renderSection("Scan Strategy", renderScanStrategy(scanStrategy, reportFilterResult.filteredCount), false),
     ...renderSection("Security Intelligence", renderSecurityIntelligence(bundle.securityIntelligence), false),
+    ...renderSection("Static Recon", renderStaticRecon(bundle.staticRecon), false),
+    ...renderSection("Static Proof Packs", renderStaticProofPacks(bundle.staticProofPacks), true, `${(bundle.staticProofPacks ?? []).length} packs`),
     ...renderSection("Action Plan", renderActionPlan(confirmedCodeFindings, dependencyFindings), true),
     ...renderSection("Top 5 Fix First", renderTopFixes(confirmedCodeFindings, dependencyFindings), true),
     ...renderSection("Attack Chains", renderAttackChains(attackChains), true, `${attackChains.length} chains`),
@@ -129,6 +132,54 @@ function renderSecurityIntelligence(intelligence?: Row): string[] {
     ...invariants.slice(0, 8).map((item: Row) => `- Invariant: ${escapeHtml(item.category)} ${escapeHtml(item.path)}:${item.line} - ${escapeHtml(item.rule)}`),
     ...boundaries.slice(0, 8).map((item: Row) => `- Boundary: ${escapeHtml(item.id)} files=${item.fileCount} entrypoints=${item.entrypointCount}`)
   ];
+}
+
+function renderStaticRecon(recon?: Row): string[] {
+  if (!recon) return ["- Static recon artifact was not generated."];
+  const endpoints = Array.isArray(recon.endpoints) ? recon.endpoints : [];
+  const guards = Array.isArray(recon.guards) ? recon.guards : [];
+  const inputVectors = Array.isArray(recon.inputVectors) ? recon.inputVectors : [];
+  const sinks = Array.isArray(recon.sinks) ? recon.sinks : [];
+  const boundaries = Array.isArray(recon.boundaries) ? recon.boundaries : [];
+  const invariants = Array.isArray(recon.invariants) ? recon.invariants : [];
+  return [
+    `- Summary: ${escapeHtml(recon.summary ?? "not recorded")}`,
+    `- Endpoints: ${endpoints.length}`,
+    `- Guard hints: ${guards.length}`,
+    `- Input vectors: ${inputVectors.length}`,
+    `- Sink/control candidates: ${sinks.length}`,
+    `- Boundaries: ${boundaries.length}`,
+    `- Business invariants: ${invariants.length}`,
+    "",
+    ...endpoints.slice(0, 20).map((item: Row) => `- Endpoint: ${escapeHtml(item.method)} ${escapeHtml(item.routePath)} @${escapeHtml(item.path)}:${item.line ?? "?"}${item.objectIdParameters?.length ? ` objectIds=${escapeHtml(item.objectIdParameters.join(", "))}` : ""}`),
+    ...guards.slice(0, 12).map((item: Row) => `- Guard: ${escapeHtml(item.path)}:${item.line ?? "?"} - ${escapeHtml(item.detail)}`),
+    ...inputVectors.slice(0, 12).map((item: Row) => `- Input: ${escapeHtml(item.path)}:${item.line ?? "?"} - ${escapeHtml(item.detail)}`),
+    ...sinks.slice(0, 12).map((item: Row) => `- Sink/control: ${escapeHtml(item.kind)} ${escapeHtml(item.path)}:${item.line ?? "?"} - ${escapeHtml(item.detail)}`)
+  ];
+}
+
+function renderStaticProofPacks(packs?: Row[]): string[] {
+  if (!Array.isArray(packs) || !packs.length) return ["No static proof packs generated."];
+  return packs.flatMap((pack, index) => renderItemDetails(`${index + 1}. ${pack.severity} ${pack.title} @${pack.location}`, [
+    `- Category: ${escapeHtml(pack.category)}`,
+    `- Confidence: ${escapeHtml(pack.confidence)} / ${escapeHtml(pack.status)}`,
+    `- Runtime validated: ${pack.runtimeValidated ? "yes" : "no - SAST/static evidence only"}`,
+    `- Source: ${escapeHtml(pack.source)}`,
+    `- Sink/control: ${escapeHtml(pack.sink)}`,
+    `- Missing control: ${escapeHtml(pack.missingControl)}`,
+    "",
+    "**Evidence:**",
+    ...(Array.isArray(pack.evidence) ? pack.evidence : []).slice(0, 6).map((item: string) => `- ${escapeHtml(item)}`),
+    "",
+    "**Exploit preconditions from static evidence:**",
+    ...(Array.isArray(pack.exploitPreconditions) ? pack.exploitPreconditions : []).slice(0, 6).map((item: string) => `- ${escapeHtml(item)}`),
+    "",
+    "**Safe regression guidance:**",
+    ...(Array.isArray(pack.safeRegressionGuidance) ? pack.safeRegressionGuidance : []).slice(0, 6).map((item: string) => `- ${escapeHtml(item)}`),
+    "",
+    "**Confidence blockers:**",
+    ...(Array.isArray(pack.confidenceBlockers) ? pack.confidenceBlockers : []).slice(0, 6).map((item: string) => `- ${escapeHtml(item)}`)
+  ], index < 5));
 }
 
 function countArrayBy(rows: Row[], key: string): Record<string, number> {

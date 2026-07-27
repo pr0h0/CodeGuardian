@@ -190,6 +190,49 @@ describe("report", () => {
     expect(content).toContain("- Rules of engagement: configured");
   });
 
+  it("renders static recon and static proof packs", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cg-"));
+    const file = writeMarkdownReport(dir, {
+      scan: { id: "1", repo_path: ".", status: "completed" },
+      files: [],
+      findings: [],
+      scannerResults: [],
+      staticRecon: {
+        summary: "1 endpoint, 1 guard, 1 input.",
+        endpoints: [{ method: "GET", routePath: "/api/documents/:documentId", path: "src/server.ts", line: 1, objectIdParameters: ["documentId"] }],
+        guards: [{ kind: "guard", path: "src/server.ts", line: 1, detail: "requireAuth" }],
+        inputVectors: [{ kind: "request-input", path: "src/server.ts", line: 2, detail: "req.params.documentId" }],
+        sinks: [{ kind: "database-read", path: "src/server.ts", line: 3, detail: "Document.findById" }],
+        boundaries: [],
+        invariants: []
+      },
+      staticProofPacks: [{
+        id: "p1",
+        title: "Tenant object read lacks ownership guard",
+        category: "authz",
+        severity: "high",
+        confidence: "high",
+        status: "confirmed_true_positive",
+        location: "src/server.ts:1",
+        source: "req.params.documentId",
+        sink: "Document.findById",
+        evidence: ["Document.findById(req.params.documentId)"],
+        missingControl: "No tenant ownership check.",
+        exploitPreconditions: ["authenticated user"],
+        safeRegressionGuidance: ["Add cross-tenant unit test."],
+        confidenceBlockers: ["No runtime validation."],
+        runtimeValidated: false
+      }]
+    });
+
+    const content = fs.readFileSync(file, "utf8");
+    expect(content).toContain("Static Recon");
+    expect(content).toContain("Endpoint: GET /api/documents/:documentId");
+    expect(content).toContain("Static Proof Packs");
+    expect(content).toContain("Runtime validated: no - SAST/static evidence only");
+    expect(content).toContain("No tenant ownership check.");
+  });
+
   it("exports semgrep-style rules for true positives", () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cg-"));
     const file = writeRuleExport(dir, {

@@ -23,6 +23,7 @@ vi.mock("../../src/scanners/bearer.js", () => ({ runBearer: vi.fn(async () => ({
 
 describe("runScan integration", () => {
   beforeEach(() => {
+    vi.clearAllMocks();
     delete process.env.CODEGUARDIAN_DB_PATH;
     delete process.env.CODEGUARDIAN_REPORT_DIR;
   });
@@ -53,5 +54,42 @@ describe("runScan integration", () => {
       catalog: expect.any(Array)
     }));
     expect(report.aiJobs.total).toBe(0);
+  });
+
+  it("resumes deterministic scanner results from a compatible workspace snapshot", async () => {
+    const { createRunContext } = await import("../../src/core/runContext.js");
+    const { runScan } = await import("../../src/core/scanner.js");
+    const { runSemgrep } = await import("../../src/scanners/semgrep.js");
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "cg-run-resume-"));
+    const repoDir = path.join(tempDir, "repo");
+    fs.cpSync("fixtures/vulnerable-app", repoDir, { recursive: true });
+    process.env.CODEGUARDIAN_DB_PATH = path.join(tempDir, "codeguardian.sqlite");
+
+    const first = createRunContext(repoDir, {
+      out: tempDir,
+      format: "json",
+      ai: false,
+      include: ["server.js"],
+      workspace: "audit-1"
+    });
+    await runScan(first);
+    expect(runSemgrep).toHaveBeenCalledTimes(1);
+
+    const second = createRunContext(repoDir, {
+      out: tempDir,
+      format: "json",
+      ai: false,
+      include: ["server.js"],
+      workspace: "audit-1",
+      resume: true
+    });
+    const result = await runScan(second);
+
+    expect(runSemgrep).toHaveBeenCalledTimes(1);
+    const jsonReport = result.reportFiles.find((file) => file.endsWith(".json"));
+    const report = JSON.parse(fs.readFileSync(jsonReport!, "utf8"));
+    expect(report.workspace).toEqual(expect.objectContaining({ name: "audit-1", resume: true }));
+    expect(report.staticProofPacks.length).toBeGreaterThan(0);
+    expect(report.staticRecon.summary).toContain("endpoint");
   });
 });

@@ -11,6 +11,7 @@ import { resolveApproval } from "./tools/approvals.js";
 import { runCurlTool } from "./tools/curlTool.js";
 import { runPuppeteerTool } from "./tools/puppeteerTool.js";
 import { runDoctor } from "./tools/doctor.js";
+import { listScanWorkspaces, summarizeScanWorkspace } from "./core/resume.js";
 
 function addScanOptions(command: Command): Command {
   return command
@@ -37,6 +38,8 @@ function addScanOptions(command: Command): Command {
     .option("--fail-on <severity>", "critical|high|medium|low|none", "none")
     .option("--ci", "CI mode: output GitHub Actions annotations and machine-readable summary")
     .option("--diff [ref]", "scan only files changed in git vs HEAD or specified ref")
+    .option("--workspace <name>", "scan workspace name for resumable static scan artifacts")
+    .option("--resume [workspace]", "resume a compatible scan workspace; optionally name the workspace")
     .option("--verbose", "verbose logging");
 }
 
@@ -59,6 +62,7 @@ export async function runCli(argv: string[]): Promise<void> {
   program.name("codeguardian").description("AI-assisted local security scanner").version("0.1.0");
 
   addScanOptions(program.command("scan <repoPath>").description("Index, scan, triage, and report")).action(async (repoPath, options) => {
+    if (typeof options.resume === "string" && !options.workspace) options.workspace = options.resume;
     const ctx = createRunContext(repoPath, options);
     const result = await runScan(ctx);
     console.log(`scan ${result.scanId} complete`);
@@ -133,6 +137,35 @@ export async function runCli(argv: string[]): Promise<void> {
     }
     for (const file of writeReports(path.resolve(options.out ?? env.CODEGUARDIAN_REPORT_DIR), options.format, bundle, [])) console.log(file);
     db.close();
+  });
+
+  program.command("workspaces").description("List local resumable scan workspaces").option("--repo <repoPath>", "repository path", ".").action((options) => {
+    const repoPath = path.resolve(options.repo);
+    const workspaces = listScanWorkspaces(repoPath);
+    if (!workspaces.length) {
+      console.log(`no workspaces found for ${repoPath}`);
+      return;
+    }
+    for (const workspace of workspaces) {
+      const stages = workspace.stages.map((stage) => stage.stage).join(", ") || "none";
+      console.log(`${workspace.name}\t${workspace.status}\t${stages}`);
+    }
+  });
+
+  program.command("status [workspace]").description("Show resumable scan workspace status").option("--repo <repoPath>", "repository path", ".").action((workspaceName, options) => {
+    const repoPath = path.resolve(options.repo);
+    const summary = workspaceName
+      ? summarizeScanWorkspace(repoPath, workspaceName)
+      : listScanWorkspaces(repoPath).at(-1);
+    if (!summary) {
+      console.log(`no workspaces found for ${repoPath}`);
+      return;
+    }
+    console.log(`workspace: ${summary.name}`);
+    console.log(`status: ${summary.status}`);
+    console.log(`path: ${summary.dir}`);
+    if (summary.error) console.log(`error: ${summary.error}`);
+    for (const stage of summary.stages) console.log(`stage: ${stage.stage} updated=${stage.updatedAt}`);
   });
 
   await program.parseAsync(argv);

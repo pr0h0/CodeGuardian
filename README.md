@@ -41,6 +41,10 @@ codeguardian scan ./some-repo --ai --max-ai-findings 150 --ai-triage-target 40
 codeguardian scan ./some-repo --ai --max-ai-audit-files 80 --max-ai-audit-rounds 10
 codeguardian scan ./some-repo --baseline latest
 codeguardian scan ./some-repo --profile cli --incremental
+codeguardian scan ./some-repo --workspace q1-audit
+codeguardian scan ./some-repo --resume q1-audit
+codeguardian workspaces --repo ./some-repo
+codeguardian status q1-audit --repo ./some-repo
 codeguardian report <scanId>
 ```
 
@@ -55,6 +59,7 @@ Before an AI scan starts, Codeguardian preflights the low, medium, and high mode
 Reports default to timestamped files such as `codeguardian-report/report-APP-YYYY-MM-DD-HHMMSS.md`, `.json`, and `.sarif`.
 
 Reports include baseline diff, top-fix-first ordering, grouped low-signal noise, dependency reachability hints, CWE/OWASP metadata where known, and suppressions.
+Reports also include source-only Static Recon and Static Proof Packs. Static Recon summarizes endpoint, guard, input-vector, sink/control, boundary, and business-invariant evidence from indexed source. Static Proof Packs explain the code evidence, missing control, static exploit preconditions, confidence blockers, and safe regression-test guidance for active findings. They are SAST evidence artifacts, not runtime exploit proof.
 Correlation checks connect related signals, such as prototype pollution plus vulnerable Eta template engine dependency RCE, reachable vulnerable dependencies, or spoofable Host / proxy headers used to gate admin routes across Express/Next, Flask/Django, Laravel/PHP, Rails/Ruby, Spring/Java, ASP.NET, and Go HTTP handlers.
 
 Suppress findings with `.codeguardianignore` or inline comments:
@@ -120,6 +125,19 @@ codeguardian test-web --target http://dev.local:3000 --allow-host dev.local --ru
 ```
 
 If `--target` is omitted, `test-web` uses `CODEGUARDIAN_DEFAULT_TARGET`. Set `CODEGUARDIAN_REQUIRE_APPROVAL=false` only for trusted local targets.
+
+## Resumable Static Scans
+
+Named workspaces store compatible static-scan stage snapshots under `.codeguardian/workspaces/<name>/` in the scanned repository.
+
+```bash
+codeguardian scan . --workspace q1-audit --no-ai
+codeguardian scan . --resume q1-audit --no-ai
+codeguardian status q1-audit --repo .
+codeguardian workspaces --repo .
+```
+
+Resume skips compatible deterministic scanner-result generation while still re-indexing the current source tree and rebuilding the scan database/report from current evidence. If relevant scan options, project config, or source-tree metadata change, resume fails instead of reusing stale evidence.
 
 ## Custom Rules
 

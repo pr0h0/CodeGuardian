@@ -95,6 +95,14 @@ export interface ScanBundle {
   scannerRuns: ScannerRunRow[];
   findings: FindingRow[];
   approvals: ApprovalRow[];
+  workspace?: {
+    name: string;
+    dir: string;
+    resume: boolean;
+    fingerprint: string;
+  };
+  staticRecon?: unknown;
+  staticProofPacks?: unknown[];
 }
 
 export interface SymbolInsertRow {

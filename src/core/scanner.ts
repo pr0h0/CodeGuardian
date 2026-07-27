@@ -18,7 +18,7 @@ import { runComplianceChecks } from "../scanners/compliance.js";
 import { runCorrelationChecks } from "../scanners/correlations.js";
 import { runSourcePatternChecks } from "../scanners/sourcePatterns.js";
 import { runBusinessInvariantChecks } from "../repo/businessInvariants.js";
-import { applySuppressions } from "../scanners/suppressions.js";
+import { applySuppressions, type SuppressionSummary } from "../scanners/suppressions.js";
 import { deterministicFinding, aiTriage } from "../ai/triage.js";
 import { runTargetedExploratoryAudit, type AiAuditArtifactEvent } from "../ai/audit.js";
 import { aiHighModel, aiLowModel, aiMediumModel, createAiProvider } from "../ai/provider.js";
@@ -55,8 +55,12 @@ import { dedupeFindings } from "./findingDeduper.js";
 import { buildScanStrategyInstructions, combineAiInstructions, scanStrategyMetadata } from "./scanStrategy.js";
 import { buildSecurityIntelligence, type AiSourceMapForIntelligence } from "../repo/securityIntelligence.js";
 import { loadNegativeEvidenceMemory } from "./negativeEvidence.js";
+import { buildResumeFingerprint, buildSourceTreeFingerprint, readStageSnapshot, resolveScanWorkspace, writeStageSnapshot } from "./resume.js";
+import { buildStaticProofPacks } from "./staticProof.js";
+import { buildStaticReconArtifact } from "./staticRecon.js";
 
 type AiProviderSet = Record<AiTier, AiProvider> & { critic?: AiProvider };
+type ScannerSnapshot = { scannerResults: ScannerResult[]; warnings: string[]; suppressions: SuppressionSummary };
 
 export async function runScan(ctx: RunContext): Promise<{ scanId: string; reportFiles: string[]; warnings: string[]; exitCode: number }> {
   const db = openDatabase(path.resolve(ctx.repoPath, ctx.env.CODEGUARDIAN_DB_PATH || DEFAULT_DB_PATH));
@@ -90,6 +94,11 @@ export async function runScan(ctx: RunContext): Promise<{ scanId: string; report
   const scanId = createScan(db, ctx.repoPath, ctx.options, aiMeta.provider, aiMeta.model);
   ctx.logger.info(`scan: created ${scanId}`);
   const warnings: string[] = [];
+  const workspace = resolveScanWorkspace(ctx.repoPath, {
+    workspace: ctx.options.workspace || undefined,
+    resume: ctx.options.resume,
+    options: ctx.options
+  });
   ctx.logger.info("tools: checking availability");
   const toolStatuses = await Promise.all(["docker", "rg", "node", "npm"].map(async (name) => ({ name, ...(await checkTool(name)) })));
   for (const tool of toolStatuses) ctx.logger.info(`tools: ${tool.name} ${tool.available ? "available" : "missing"}`);
@@ -102,6 +111,18 @@ export async function runScan(ctx: RunContext): Promise<{ scanId: string; report
       ctx.logger.info(`diff: ${diffFiles.length} files changed since ${typeof ctx.options.diff === "string" ? ctx.options.diff : "HEAD"}`);
       include = diffFiles.length ? [...(ctx.options.include ?? []), ...diffFiles] : ["__codeguardian_no_changed_files__"];
     }
+    const sourceTreeFingerprint = buildSourceTreeFingerprint(ctx.repoPath, {
+      maxFiles: ctx.options.maxFiles,
+      include,
+      exclude: ctx.options.exclude
+    });
+    const resumeFingerprint = buildResumeFingerprint({
+      repoPath: ctx.repoPath,
+      options: ctx.options,
+      projectConfig: ctx.projectConfig,
+      sourceTreeFingerprint
+    });
+    if (ctx.options.workspace || ctx.options.resume) ctx.logger.info(`workspace: ${workspace.name}${ctx.options.resume ? " resume=enabled" : ""}`);
     const allFiles = indexRepository(db, scanId, ctx.repoPath, {
       maxFiles: ctx.options.maxFiles,
       maxFileSize: ctx.options.maxFileSize,
@@ -109,6 +130,12 @@ export async function runScan(ctx: RunContext): Promise<{ scanId: string; report
       exclude: ctx.options.exclude
     });
     ctx.logger.info(`index: indexed ${allFiles.length} files`);
+    if (ctx.options.workspace || ctx.options.resume) {
+      writeStageSnapshot(workspace, "index", resumeFingerprint, {
+        indexedFiles: allFiles.length,
+        files: allFiles.map((file) => ({ path: file.path, language: file.language, lineCount: file.lineCount, sha256: sha256(file.content) }))
+      });
+    }
     const aiInstructions = loadAiInstructions(ctx.repoPath);
     const strategyInstructions = buildScanStrategyInstructions(ctx.projectConfig);
     const effectiveAiInstructions = combineAiInstructions(aiInstructions.content, strategyInstructions);
@@ -118,53 +145,67 @@ export async function runScan(ctx: RunContext): Promise<{ scanId: string; report
     persistScanPlanCache(db, ctx.repoPath, allFiles);
     const localFiles = scanPlan.localFiles;
     if (ctx.options.incremental) ctx.logger.info(`incremental: changed files=${scanPlan.changedPaths.size} localScannerFiles=${localFiles.length}`);
-    ctx.logger.info("scanners: running local scanners in parallel");
-    const localScannerJobs = [
-      Promise.resolve().then(() => { const r = runCustomRules(localFiles); ctx.logger.info(`scanners: custom rules produced ${r.length} results`); return r; }),
-      Promise.resolve().then(() => { const r = runSourcePatternChecks(localFiles); ctx.logger.info(`scanners: source-pattern checks produced ${r.length} results`); return r; }),
-      Promise.resolve().then(() => { const r = runTaintLite(localFiles); ctx.logger.info(`scanners: taint-lite produced ${r.length} results`); return r; }),
-      Promise.resolve().then(() => { const r = runTaintFlow(localFiles); ctx.logger.info(`scanners: taint-flow produced ${r.length} results`); return r; }),
-      Promise.resolve().then(() => { const r = runBusinessInvariantChecks(localFiles); ctx.logger.info(`scanners: business invariant checks produced ${r.length} results`); return r; }),
-      Promise.resolve().then(() => { const r = runConfigChecks(localFiles); ctx.logger.info(`scanners: config checks produced ${r.length} results`); return r; }),
-      Promise.resolve().then(() => { const r = runQualityChecks(localFiles); ctx.logger.info(`scanners: quality checks produced ${r.length} results`); return r; })
-    ];
-    const [customResults, sourcePatternResults, taintResults, taintFlowResults, businessInvariantResults, configResults, qualityResults] = await Promise.all(localScannerJobs);
-    ctx.logger.info("scanners: running external scanners");
-    const scannerJobs = [
-      runLoggedScanner(ctx, db, scanId, "semgrep", () => runSemgrep(ctx.repoPath, scannerTimeout(ctx, "semgrep"))),
-      runLoggedScanner(ctx, db, scanId, "gitleaks", () => runGitleaks(ctx.repoPath, scannerTimeout(ctx, "gitleaks"))),
-      runLoggedScanner(ctx, db, scanId, "trivy", () => runTrivy(ctx.repoPath, scannerTimeout(ctx, "trivy"))),
-      runLoggedScanner(ctx, db, scanId, "osv-scanner", () => runOsv(ctx.repoPath, scannerTimeout(ctx, "osv-scanner"))),
-      runLoggedScanner(ctx, db, scanId, "bearer", () => runBearer(ctx.repoPath, scannerTimeout(ctx, "bearer")))
-    ];
-    const scanners = await Promise.all(scannerJobs);
-    const externalResults = filterResultsToScanScope(scanners.flatMap((scan) => {
-      if (scan.warning) warnings.push(scan.warning);
-      return scan.results;
-    }), scanPlan);
-    const preliminaryScannerResults = [
-      ...customResults,
-      ...sourcePatternResults,
-      ...taintResults,
-      ...taintFlowResults,
-      ...businessInvariantResults,
-      ...configResults,
-      ...qualityResults,
-      ...externalResults
-    ];
-    ctx.logger.info("scanners: running compliance checks");
-    const complianceResults = runComplianceChecks(allFiles, preliminaryScannerResults);
-    ctx.logger.info(`scanners: compliance checks produced ${complianceResults.length} results`);
-    ctx.logger.info("scanners: running correlation checks");
-    const correlationResults = runCorrelationChecks(allFiles, preliminaryScannerResults);
-    ctx.logger.info(`scanners: correlation checks produced ${correlationResults.length} results`);
-    const rawScannerResults = [...preliminaryScannerResults, ...complianceResults, ...correlationResults];
-    const configuredResults = applyProjectPolicy(rawScannerResults, ctx);
-    const suppressed = applySuppressions(ctx.repoPath, allFiles, configuredResults);
-    if (suppressed.summary.suppressed) ctx.logger.info(`suppressions: removed ${suppressed.summary.suppressed} results`);
-    const noiseReducedResults = reduceScannerResultNoise(suppressed.results);
-    if (noiseReducedResults.length !== suppressed.results.length) ctx.logger.info(`noise: collapsed ${suppressed.results.length - noiseReducedResults.length} duplicate scanner results`);
-    const scannerResults = attachScannerFingerprints(noiseReducedResults);
+    const resumedScannerSnapshot = ctx.options.resume
+      ? readStageSnapshot<ScannerSnapshot>(workspace, "scanner-results", resumeFingerprint, { strict: true })
+      : undefined;
+    let scannerResults: ScannerResult[];
+    let suppressionSummary: SuppressionSummary;
+    if (resumedScannerSnapshot) {
+      scannerResults = resumedScannerSnapshot.scannerResults;
+      suppressionSummary = resumedScannerSnapshot.suppressions;
+      warnings.push(...resumedScannerSnapshot.warnings);
+      ctx.logger.info(`workspace: loaded scanner-results snapshot results=${scannerResults.length}`);
+    } else {
+      ctx.logger.info("scanners: running local scanners in parallel");
+      const localScannerJobs = [
+        Promise.resolve().then(() => { const r = runCustomRules(localFiles); ctx.logger.info(`scanners: custom rules produced ${r.length} results`); return r; }),
+        Promise.resolve().then(() => { const r = runSourcePatternChecks(localFiles); ctx.logger.info(`scanners: source-pattern checks produced ${r.length} results`); return r; }),
+        Promise.resolve().then(() => { const r = runTaintLite(localFiles); ctx.logger.info(`scanners: taint-lite produced ${r.length} results`); return r; }),
+        Promise.resolve().then(() => { const r = runTaintFlow(localFiles); ctx.logger.info(`scanners: taint-flow produced ${r.length} results`); return r; }),
+        Promise.resolve().then(() => { const r = runBusinessInvariantChecks(localFiles); ctx.logger.info(`scanners: business invariant checks produced ${r.length} results`); return r; }),
+        Promise.resolve().then(() => { const r = runConfigChecks(localFiles); ctx.logger.info(`scanners: config checks produced ${r.length} results`); return r; }),
+        Promise.resolve().then(() => { const r = runQualityChecks(localFiles); ctx.logger.info(`scanners: quality checks produced ${r.length} results`); return r; })
+      ];
+      const [customResults, sourcePatternResults, taintResults, taintFlowResults, businessInvariantResults, configResults, qualityResults] = await Promise.all(localScannerJobs);
+      ctx.logger.info("scanners: running external scanners");
+      const scannerJobs = [
+        runLoggedScanner(ctx, db, scanId, "semgrep", () => runSemgrep(ctx.repoPath, scannerTimeout(ctx, "semgrep"))),
+        runLoggedScanner(ctx, db, scanId, "gitleaks", () => runGitleaks(ctx.repoPath, scannerTimeout(ctx, "gitleaks"))),
+        runLoggedScanner(ctx, db, scanId, "trivy", () => runTrivy(ctx.repoPath, scannerTimeout(ctx, "trivy"))),
+        runLoggedScanner(ctx, db, scanId, "osv-scanner", () => runOsv(ctx.repoPath, scannerTimeout(ctx, "osv-scanner"))),
+        runLoggedScanner(ctx, db, scanId, "bearer", () => runBearer(ctx.repoPath, scannerTimeout(ctx, "bearer")))
+      ];
+      const scanners = await Promise.all(scannerJobs);
+      const externalResults = filterResultsToScanScope(scanners.flatMap((scan) => {
+        if (scan.warning) warnings.push(scan.warning);
+        return scan.results;
+      }), scanPlan);
+      const preliminaryScannerResults = [
+        ...customResults,
+        ...sourcePatternResults,
+        ...taintResults,
+        ...taintFlowResults,
+        ...businessInvariantResults,
+        ...configResults,
+        ...qualityResults,
+        ...externalResults
+      ];
+      ctx.logger.info("scanners: running compliance checks");
+      const complianceResults = runComplianceChecks(allFiles, preliminaryScannerResults);
+      ctx.logger.info(`scanners: compliance checks produced ${complianceResults.length} results`);
+      ctx.logger.info("scanners: running correlation checks");
+      const correlationResults = runCorrelationChecks(allFiles, preliminaryScannerResults);
+      ctx.logger.info(`scanners: correlation checks produced ${correlationResults.length} results`);
+      const rawScannerResults = [...preliminaryScannerResults, ...complianceResults, ...correlationResults];
+      const configuredResults = applyProjectPolicy(rawScannerResults, ctx);
+      const suppressed = applySuppressions(ctx.repoPath, allFiles, configuredResults);
+      suppressionSummary = suppressed.summary;
+      if (suppressed.summary.suppressed) ctx.logger.info(`suppressions: removed ${suppressed.summary.suppressed} results`);
+      const noiseReducedResults = reduceScannerResultNoise(suppressed.results);
+      if (noiseReducedResults.length !== suppressed.results.length) ctx.logger.info(`noise: collapsed ${suppressed.results.length - noiseReducedResults.length} duplicate scanner results`);
+      scannerResults = attachScannerFingerprints(noiseReducedResults);
+      if (ctx.options.workspace || ctx.options.resume) writeStageSnapshot(workspace, "scanner-results", resumeFingerprint, { scannerResults, warnings, suppressions: suppressionSummary });
+    }
     ctx.logger.info(`scanners: total ${scannerResults.length} results`);
     const negativeEvidence = loadNegativeEvidenceMemory(db, ctx.repoPath, scanId);
     if (negativeEvidence.length) ctx.logger.info(`ai-memory: loaded ${negativeEvidence.length} false-positive evidence items`);
@@ -235,7 +276,10 @@ export async function runScan(ctx: RunContext): Promise<{ scanId: string; report
       aiSourceMap,
       auditArtifacts
     });
-    const bundle = prepareReportBundle({ ...getScanBundle(db, scanId), toolStatuses, baselineDiff, suppressions: suppressed.summary, aiBudget, aiUsage: aiUsageTracker.summary(), aiJobs: aiJobRecorder.summary(), aiInstructions: { path: aiInstructions.path, chars: effectiveAiInstructions.length, loaded: Boolean(aiInstructions.path || strategyInstructions) }, projectConfig: ctx.projectConfig, scanStrategy: scanStrategyMetadata(ctx.projectConfig), securityIntelligence, incremental: { enabled: ctx.options.incremental, changedFiles: scanPlan.changedPaths.size, localScannerFiles: localFiles.length } }, allFiles);
+    const staticProofPacks = buildStaticProofPacks(finalFindings);
+    const staticRecon = buildStaticReconArtifact({ files: allFiles, scannerResults, securityIntelligence });
+    if (ctx.options.workspace || ctx.options.resume) writeStageSnapshot(workspace, "reports", resumeFingerprint, { scanId, findings: finalFindings.length, scannerResults: scannerResults.length });
+    const bundle = prepareReportBundle({ ...getScanBundle(db, scanId), toolStatuses, baselineDiff, suppressions: suppressionSummary, aiBudget, aiUsage: aiUsageTracker.summary(), aiJobs: aiJobRecorder.summary(), aiInstructions: { path: aiInstructions.path, chars: effectiveAiInstructions.length, loaded: Boolean(aiInstructions.path || strategyInstructions) }, projectConfig: ctx.projectConfig, scanStrategy: scanStrategyMetadata(ctx.projectConfig), securityIntelligence, staticRecon, staticProofPacks, workspace: { name: workspace.name, dir: workspace.dir, resume: Boolean(ctx.options.resume), fingerprint: resumeFingerprint }, incremental: { enabled: ctx.options.incremental, changedFiles: scanPlan.changedPaths.size, localScannerFiles: localFiles.length } }, allFiles);
     ctx.logger.info(`reports: writing format=${ctx.options.format} out=${ctx.outDir}`);
     const reportFiles = writeReports(ctx.outDir, ctx.options.format, bundle, warnings);
     for (const file of reportFiles) ctx.logger.info(`reports: wrote ${file}`);
